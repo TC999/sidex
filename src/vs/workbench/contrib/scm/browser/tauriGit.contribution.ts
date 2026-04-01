@@ -290,7 +290,7 @@ class TauriGitSCMProvider extends Disposable implements ISCMProvider {
 			tooltip: `Branch: ${this._branch}`,
 		}], undefined);
 
-		this._actionButton.set(stagedResources.length > 0 ? {
+		this._actionButton.set(total > 0 ? {
 			command: { id: 'tauri-git.commit', title: '$(check) Commit' },
 			enabled: true,
 		} : undefined, undefined);
@@ -364,6 +364,9 @@ class TauriGitContribution extends Disposable implements IWorkbenchContribution 
 		const repository = this.scmService.registerSCMProvider(provider);
 		this._register(repository);
 		this._register(provider);
+
+		// Set the commit message placeholder
+		repository.input.placeholder = `Message (⌘Enter to commit on "${provider.name}")`;
 
 		this._registerCommitCommand(provider, rootPath);
 
