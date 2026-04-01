@@ -56,23 +56,35 @@
 
           if (url && (url.includes('open-vsx.org') || url.includes('openvsx.eclipsecontent.org'))) {
             try {
-              // Use Tauri's internal invoke directly (not the npm module, since this is a non-module script)
               var invoke = window.__TAURI_INTERNALS__?.invoke;
               if (invoke) {
-                var isTextRequest = url.endsWith('.json')
-                  || url.includes('/gallery/')
-                  || url.includes('/vscode/')
-                  || url.includes('Manifest');
-                if (isTextRequest) {
-                  var text = await invoke('fetch_url_text', { url: url });
-                  return new Response(text, {
-                    status: 200,
-                    headers: { 'Content-Type': 'application/json' },
-                  });
-                } else {
-                  var bytes = await invoke('fetch_url', { url: url });
-                  return new Response(new Uint8Array(bytes), { status: 200 });
+                var method = (init && init.method) ? init.method : 'GET';
+                var hdrs = {};
+                if (init && init.headers) {
+                  if (init.headers instanceof Headers) {
+                    init.headers.forEach(function(v, k) { hdrs[k] = v; });
+                  } else if (typeof init.headers === 'object') {
+                    hdrs = Object.assign({}, init.headers);
+                  }
                 }
+                var bodyStr = null;
+                if (init && init.body) {
+                  bodyStr = typeof init.body === 'string' ? init.body : JSON.stringify(init.body);
+                }
+                var text = await invoke('proxy_request', {
+                  url: url,
+                  method: method,
+                  headers: hdrs,
+                  body: bodyStr
+                });
+                var contentType = 'application/octet-stream';
+                if (typeof text === 'string') {
+                  try { JSON.parse(text); contentType = 'application/json'; } catch(e) {}
+                }
+                return new Response(text, {
+                  status: 200,
+                  headers: { 'Content-Type': contentType },
+                });
               }
             } catch (e) {
               console.warn('[SideX] Proxy fetch failed, falling back:', e);
