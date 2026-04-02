@@ -163,6 +163,12 @@ This project was released early specifically so the community can help build it 
 | Extensions | Open VSX registry |
 | Storage | SQLite (via rusqlite) |
 
+## Community
+
+- **Discord:** [Join the SideX server](https://discord.gg/8CUCnEAC4J)
+- **X / Twitter:** [@ImRazshy](https://x.com/ImRazshy)
+- **Email:** kendall@siden.ai
+
 ## Credits
 
 - Architecture from [Microsoft VSCode](https://github.com/microsoft/vscode) (MIT License)

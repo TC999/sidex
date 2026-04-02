@@ -62,6 +62,12 @@ Check the [Issues](https://github.com/Sidenai/sidex/issues) tab for open tasks. 
 - `ARCHITECTURE.md` — Deep dive into how it all maps together
 - `AGENTS.md` — Detailed guide for AI-assisted development
 
+## Questions?
+
+Jump in the Discord if you need help getting set up or want to coordinate with others: [discord.gg/8CUCnEAC4J](https://discord.gg/8CUCnEAC4J)
+
+You can also reach out directly at kendall@siden.ai or [@ImRazshy](https://x.com/ImRazshy) on X.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
