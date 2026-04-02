@@ -181,7 +181,7 @@ pub fn exists(path: String) -> bool {
 
 #[tauri::command]
 pub fn fs_stat(path: String) -> Result<FileStat, String> {
-    let p = Path::new(&path);
+    let _p = Path::new(&path);
     let symlink_meta = fs::symlink_metadata(&path)
         .map_err(|e| format!("Failed to stat '{}': {}", path, e))?;
     let is_symlink = symlink_meta.file_type().is_symlink();

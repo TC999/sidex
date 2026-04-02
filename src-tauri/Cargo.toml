@@ -36,3 +36,33 @@ tokio = { version = "1", features = ["full"] }
 hostname = "0.4"
 dirs = "5"
 reqwest = { version = "0.12", features = ["rustls-tls"] }
+
+# Compression & encoding
+flate2 = "1"
+zip = "2"
+base64 = "0.22"
+
+# Crypto
+sha2 = "0.10"
+md5 = "0.7"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+
+# Path utilities
+pathdiff = "0.2"
+glob = "0.3"
+globset = "0.4"
+
+# Search indexing
+dashmap = "6"
+rayon = "1.10"
+regex = "1"
+
+# Document management
+memmap2 = "0.9"
+encoding_rs = "0.8"
+
+# Process & terminal management
+crossbeam = "0.8"
+which = "6"
+libc = "0.2"

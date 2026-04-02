@@ -1,10 +1,14 @@
 mod commands;
 
 use commands::debug::DebugAdapterStore;
+use commands::doc::DocStore;
 use commands::ext_host::ExtHostProcess;
+use commands::index::IndexStore;
+use commands::process::ProcessStore;
 use commands::storage::StorageDb;
 use commands::tasks::TaskProcessStore;
 use commands::terminal::TerminalStore;
+use commands::watch::WatchStore;
 use std::sync::Arc;
 use tauri::Manager;
 use tauri::menu::{Menu, MenuItemBuilder, SubmenuBuilder, PredefinedMenuItem};
@@ -161,8 +165,12 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Arc::new(TerminalStore::new()))
+        .manage(Arc::new(ProcessStore::new()))
         .manage(Arc::new(DebugAdapterStore::new()))
         .manage(Arc::new(TaskProcessStore::new()))
+        .manage(Arc::new(WatchStore::new()))
+        .manage(Arc::new(IndexStore::new(true)))
+        .manage(Arc::new(DocStore::new()))
         .manage(ExtHostProcess::new())
         .setup(|app| {
             let app_data = app
@@ -174,6 +182,13 @@ pub fn run() {
             let db = StorageDb::new(db_path.to_str().unwrap())
                 .expect("failed to initialize storage database");
             app.manage(Arc::new(db));
+
+            // Set app handle for stores to enable event emission
+            let doc_store = app.state::<Arc<DocStore>>();
+            doc_store.set_app_handle(app.handle().clone());
+            
+            let process_store = app.state::<Arc<ProcessStore>>();
+            process_store.set_app_handle(app.handle().clone());
 
             let menu = build_menu(app.handle())?;
             app.set_menu(menu)?;
@@ -218,6 +233,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            // File system
             commands::read_file,
             commands::read_file_bytes,
             commands::write_file,
@@ -228,11 +244,64 @@ pub fn run() {
             commands::remove,
             commands::rename,
             commands::exists,
+            // Path operations
+            commands::parse_path,
+            commands::join_paths,
+            commands::relative_path,
+            commands::glob_match,
+            commands::ext_category,
+            commands::is_binary_file,
+            commands::common_parent,
+            // Text processing
+            commands::count_lines,
+            commands::file_summary,
+            commands::normalize_line_endings,
+            commands::to_crlf,
+            commands::trim_trailing_whitespace,
+            commands::ensure_final_newline,
+            commands::get_word_boundaries,
+            commands::simple_diff,
+            commands::file_hash,
+            commands::files_equal,
+            // Compression
+            commands::gzip_compress,
+            commands::gzip_decompress,
+            commands::gzip_compress_text,
+            commands::gzip_decompress_text,
+            commands::zip_list,
+            commands::zip_extract_file,
+            commands::zip_create,
+            // Crypto
+            commands::sha256_hash,
+            commands::sha256_file,
+            commands::md5_hash,
+            commands::md5_file,
+            commands::random_bytes,
+            commands::uuid_v4,
+            commands::base64_encode,
+            commands::base64_decode,
+            commands::base64_encode_urlsafe,
+            commands::base64_decode_urlsafe,
+            commands::file_hashes,
             commands::terminal_spawn,
             commands::terminal_write,
             commands::terminal_resize,
             commands::terminal_kill,
             commands::terminal_get_pid,
+            // High-performance process management
+            commands::term_spawn,
+            commands::term_write,
+            commands::term_resize,
+            commands::term_read,
+            commands::term_kill,
+            commands::term_info,
+            commands::term_list,
+            commands::term_is_alive,
+            commands::term_clear_buffer,
+            commands::term_signal,
+            commands::term_set_cwd,
+            commands::term_get_shells,
+            commands::exec,
             commands::get_default_shell,
             commands::check_shell_exists,
             commands::get_available_shells,
@@ -285,6 +354,36 @@ pub fn run() {
             commands::task_spawn,
             commands::task_kill,
             commands::task_list,
+            // File watching
+            commands::watch_start,
+            commands::watch_stop,
+            commands::watch_update_patterns,
+            commands::watch_list,
+            commands::watch_is_active,
+            // Index search
+            commands::index_build,
+            commands::index_search,
+            commands::index_update,
+            commands::index_stats,
+            commands::index_clear,
+            // Document management
+            commands::doc_open,
+            commands::doc_get,
+            commands::doc_edit,
+            commands::doc_stats,
+            commands::doc_save,
+            commands::doc_close,
+            commands::doc_undo,
+            commands::doc_redo,
+            commands::doc_autosave,
+            commands::doc_list,
+            commands::doc_is_dirty,
+            commands::doc_path,
+            commands::doc_trigger_autosave,
+            commands::doc_encoding_info,
+            commands::doc_set_line_endings,
+            commands::doc_position_to_offset,
+            commands::doc_offset_to_position,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,333 +1,1107 @@
-use serde::Serialize;
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+//! High-performance process and terminal management module for SideX
+//! 
+//! Features:
+//! - PTY (pseudo-terminal) support with full terminal emulation
+//! - Ring buffer for output to prevent memory exhaustion
+//! - Backpressure handling to slow down processes when frontend can't keep up
+//! - Multiple shell support (bash, zsh, powershell, cmd, fish)
+//! - Process tree management for proper cleanup
 
-pub struct ProcessStore {
-    processes: Mutex<HashMap<u32, ProcessHandle>>,
-    next_id: Mutex<u32>,
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex, atomic::{AtomicU32, AtomicBool, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use tauri::{AppHandle, Emitter, State};
+use crossbeam::channel::{bounded, Sender, Receiver, TryRecvError};
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Default ring buffer capacity (lines)
+const DEFAULT_RING_BUFFER_CAPACITY: usize = 10_000;
+
+/// Maximum output channel size (backpressure threshold)
+const OUTPUT_CHANNEL_SIZE: usize = 1_000;
+
+/// Default read timeout for exec command (ms)
+const DEFAULT_EXEC_TIMEOUT_MS: u64 = 30_000;
+
+/// Buffer size for PTY reads
+const PTY_READ_BUFFER_SIZE: usize = 8192;
+
+// ============================================================================
+// Data Structures
+// ============================================================================
+
+/// Unique handle for a terminal instance
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash, Eq, PartialEq)]
+pub struct TermHandle(pub u32);
+
+impl TermHandle {
+    fn next() -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(1);
+        TermHandle(COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
 }
 
-struct ProcessHandle {
-    child: Child,
-    stdin: Option<std::process::ChildStdin>,
+/// A single line of terminal output
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputLine {
+    pub text: String,
+    pub is_stderr: bool,
+    pub timestamp: u64,
+}
+
+impl OutputLine {
+    fn new(text: String, is_stderr: bool) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self { text, is_stderr, timestamp }
+    }
+}
+
+/// Terminal information
+#[derive(Debug, Clone, Serialize)]
+pub struct TermInfo {
+    pub handle: TermHandle,
+    pub shell: String,
+    pub cwd: String,
+    pub pid: u32,
+    pub cols: u16,
+    pub rows: u16,
+    pub is_alive: bool,
+    pub output_lines_total: usize,
+}
+
+/// Result of a simple command execution
+#[derive(Debug, Serialize)]
+pub struct ExecResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+/// Shell information
+#[derive(Debug, Clone, Serialize)]
+pub struct ShellInfo {
+    pub name: String,
+    pub path: String,
+    pub is_default: bool,
+}
+
+// ============================================================================
+// Ring Buffer
+// ============================================================================
+
+/// Ring buffer for terminal output with overflow tracking
+struct RingBuffer {
+    capacity: usize,
+    buffer: VecDeque<OutputLine>,
+    dropped_count: usize,
+    total_count: usize,
+}
+
+impl RingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            buffer: VecDeque::with_capacity(capacity),
+            dropped_count: 0,
+            total_count: 0,
+        }
+    }
+
+    /// Push a line to the buffer, dropping oldest if at capacity
+    fn push(&mut self, line: OutputLine) {
+        self.total_count += 1;
+        if self.buffer.len() >= self.capacity {
+            self.buffer.pop_front();
+            self.dropped_count += 1;
+        }
+        self.buffer.push_back(line);
+    }
+
+    /// Get lines from the buffer (up to max_lines)
+    fn get_lines(&self, max_lines: Option<usize>) -> Vec<OutputLine> {
+        let max = max_lines.unwrap_or(100).min(self.buffer.len());
+        self.buffer.iter().rev().take(max).rev().cloned().collect()
+    }
+
+    /// Get and clear the dropped count
+    fn take_dropped_count(&mut self) -> usize {
+        let count = self.dropped_count;
+        self.dropped_count = 0;
+        count
+    }
+
+    fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn total_count(&self) -> usize {
+        self.total_count
+    }
+}
+
+// ============================================================================
+// Output Reader Thread
+// ============================================================================
+
+/// Message types for output channel
+enum OutputMessage {
+    Data(OutputLine),
+    Shutdown,
+}
+
+/// Spawn a reader thread that reads PTY output and sends to channel
+fn spawn_output_reader(
+    mut reader: Box<dyn Read + Send>,
+    sender: Sender<OutputMessage>,
+    _handle: TermHandle,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut buf = [0u8; PTY_READ_BUFFER_SIZE];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    // EOF reached
+                    let _ = sender.send(OutputMessage::Shutdown);
+                    break;
+                }
+                Ok(n) => {
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let line = OutputLine::new(text, false);
+                    if sender.send(OutputMessage::Data(line)).is_err() {
+                        // Channel closed, exit reader
+                        break;
+                    }
+                }
+                Err(e) => {
+                    // Read error, send error message
+                    let error_text = format!("\r\n[Terminal read error: {}]\r\n", e);
+                    let _ = sender.send(OutputMessage::Data(OutputLine::new(error_text, true)));
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    })
+}
+
+// ============================================================================
+// Terminal Instance
+// ============================================================================
+
+/// Internal terminal state
+pub struct Terminal {
+    handle: TermHandle,
+    shell: String,
+    cwd: String,
+    _pty: Box<dyn MasterPty + Send>,  // Keep alive for the lifetime
+    writer: Box<dyn Write + Send>,
+    output: Arc<Mutex<RingBuffer>>,
+    sender: Sender<OutputMessage>,
+    child: Box<dyn portable_pty::Child + Send>,
+    _reader_handle: Option<std::thread::JoinHandle<()>>,
+    cols: u16,
+    rows: u16,
+    is_alive: Arc<AtomicBool>,
+}
+
+impl Terminal {
+    fn new(
+        handle: TermHandle,
+        shell: String,
+        cwd: String,
+        pty: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        reader: Box<dyn Read + Send>,
+        child: Box<dyn portable_pty::Child + Send>,
+        cols: u16,
+        rows: u16,
+    ) -> (Self, Receiver<OutputMessage>) {
+        let output = Arc::new(Mutex::new(RingBuffer::new(DEFAULT_RING_BUFFER_CAPACITY)));
+        let (sender, receiver) = bounded(OUTPUT_CHANNEL_SIZE);
+        
+        // Spawn reader thread
+        let reader_handle = spawn_output_reader(reader, sender.clone(), handle);
+        
+        let terminal = Self {
+            handle,
+            shell,
+            cwd,
+            _pty: pty,
+            writer,
+            output: output.clone(),
+            sender,
+            child,
+            _reader_handle: Some(reader_handle),
+            cols,
+            rows,
+            is_alive: Arc::new(AtomicBool::new(true)),
+        };
+        
+        (terminal, receiver)
+    }
+
+    fn write(&mut self, data: &str) -> Result<(), String> {
+        self.writer
+            .write_all(data.as_bytes())
+            .map_err(|e| format!("Failed to write: {}", e))?;
+        self.writer
+            .flush()
+            .map_err(|e| format!("Failed to flush: {}", e))
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
+        self._pty
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("Failed to resize: {}", e))?;
+        self.cols = cols;
+        self.rows = rows;
+        Ok(())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    fn try_wait(&mut self) -> Result<Option<portable_pty::ExitStatus>, String> {
+        self.child.try_wait().map_err(|e| e.to_string())
+    }
+
+    fn kill(&mut self) -> Result<(), String> {
+        self.is_alive.store(false, Ordering::SeqCst);
+        self.child.kill().map_err(|e| format!("Failed to kill: {}", e))
+    }
+}
+
+// ============================================================================
+// Process Store
+// ============================================================================
+
+/// Store for managing all terminal instances
+pub struct ProcessStore {
+    terminals: Mutex<HashMap<TermHandle, Terminal>>,
+    output_receivers: Mutex<HashMap<TermHandle, Receiver<OutputMessage>>>,
+    app_handle: Mutex<Option<AppHandle>>,
 }
 
 impl ProcessStore {
     pub fn new() -> Self {
         Self {
-            processes: Mutex::new(HashMap::new()),
-            next_id: Mutex::new(1),
+            terminals: Mutex::new(HashMap::new()),
+            output_receivers: Mutex::new(HashMap::new()),
+            app_handle: Mutex::new(None),
+        }
+    }
+
+    pub fn set_app_handle(&self, handle: AppHandle) {
+        *self.app_handle.lock().unwrap() = Some(handle);
+    }
+
+    fn insert(&self, handle: TermHandle, terminal: Terminal, receiver: Receiver<OutputMessage>) {
+        self.terminals.lock().unwrap().insert(handle, terminal);
+        self.output_receivers.lock().unwrap().insert(handle, receiver);
+    }
+
+    fn remove(&self, handle: TermHandle) -> Option<Terminal> {
+        self.output_receivers.lock().unwrap().remove(&handle);
+        self.terminals.lock().unwrap().remove(&handle)
+    }
+
+    fn get_terminal(&self, handle: TermHandle) -> Option<(TermHandle, std::sync::MutexGuard<'_, HashMap<TermHandle, Terminal>>)> {
+        let terminals = self.terminals.lock().ok()?;
+        if terminals.contains_key(&handle) {
+            Some((handle, terminals))
+        } else {
+            None
+        }
+    }
+
+    fn contains(&self, handle: TermHandle) -> bool {
+        self.terminals.lock().unwrap().contains_key(&handle)
+    }
+
+    fn handles(&self) -> Vec<TermHandle> {
+        self.terminals.lock().unwrap().keys().cloned().collect()
+    }
+
+    /// Poll all terminals and emit events
+    pub fn poll_and_emit(&self) {
+        let handles: Vec<TermHandle> = self.handles();
+        
+        for handle in handles {
+            // Process output from receiver
+            if let Ok(receivers) = self.output_receivers.try_lock() {
+                if let Some(receiver) = receivers.get(&handle) {
+                    let mut lines_to_emit = Vec::new();
+                    let mut is_shutdown = false;
+                    
+                    // Collect available messages (non-blocking)
+                    loop {
+                        match receiver.try_recv() {
+                            Ok(OutputMessage::Data(line)) => {
+                                lines_to_emit.push(line);
+                            }
+                            Ok(OutputMessage::Shutdown) => {
+                                is_shutdown = true;
+                                break;
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                is_shutdown = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // Store in ring buffer and emit if we have lines
+                    if !lines_to_emit.is_empty() || is_shutdown {
+                        if let Ok(mut terminals) = self.terminals.try_lock() {
+                            if let Some(terminal) = terminals.get_mut(&handle) {
+                                let mut dropped = 0;
+                                
+                                for line in &lines_to_emit {
+                                    terminal.output.lock().unwrap().push(line.clone());
+                                }
+                                
+                                if !lines_to_emit.is_empty() {
+                                    dropped = terminal.output.lock().unwrap().take_dropped_count();
+                                }
+                                
+                                // Emit term-output event
+                                if let Ok(app_handle) = self.app_handle.lock() {
+                                    if let Some(app) = app_handle.as_ref() {
+                                        let _ = app.emit("term-output", TermOutputEvent {
+                                            handle,
+                                            lines: lines_to_emit,
+                                            dropped,
+                                        });
+                                    }
+                                }
+                                
+                                // Handle shutdown
+                                if is_shutdown {
+                                    terminal.is_alive.store(false, Ordering::SeqCst);
+                                    
+                                    let exit_code = match terminal.try_wait() {
+                                        Ok(Some(status)) => {
+                                            if status.success() { Some(0) } else { Some(1) }
+                                        }
+                                        _ => Some(0),
+                                    };
+                                    
+                                    if let Ok(app_handle) = self.app_handle.lock() {
+                                        if let Some(app) = app_handle.as_ref() {
+                                            let _ = app.emit("term-exit", TermExitEvent {
+                                                handle,
+                                                exit_code,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
+/// Event emitted when terminal has output
 #[derive(Debug, Clone, Serialize)]
-struct ProcessStdoutEvent {
-    process_id: u32,
-    data: String,
+struct TermOutputEvent {
+    handle: TermHandle,
+    lines: Vec<OutputLine>,
+    dropped: usize,
 }
 
+/// Event emitted when terminal exits
 #[derive(Debug, Clone, Serialize)]
-struct ProcessStderrEvent {
-    process_id: u32,
-    data: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ProcessExitEvent {
-    process_id: u32,
+struct TermExitEvent {
+    handle: TermHandle,
     exit_code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ProcessResult {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
+// ============================================================================
+// Shell Detection
+// ============================================================================
+
+/// Detect available shells on the system
+fn detect_shells() -> Vec<ShellInfo> {
+    let default_shell = std::env::var("SHELL").unwrap_or_default();
+    
+    let candidates: Vec<(&str, &str)> = if cfg!(target_os = "windows") {
+        vec![
+            ("PowerShell", "powershell.exe"),
+            ("PowerShell Core", "pwsh.exe"),
+            ("Command Prompt", "cmd.exe"),
+            ("Git Bash", "C:\\Program Files\\Git\\bin\\bash.exe"),
+            ("WSL", "wsl.exe"),
+        ]
+    } else {
+        vec![
+            ("zsh", "/bin/zsh"),
+            ("zsh", "/usr/bin/zsh"),
+            ("zsh", "/usr/local/bin/zsh"),
+            ("bash", "/bin/bash"),
+            ("bash", "/usr/bin/bash"),
+            ("fish", "/usr/bin/fish"),
+            ("fish", "/usr/local/bin/fish"),
+            ("fish", "/opt/homebrew/bin/fish"),
+            ("sh", "/bin/sh"),
+            ("sh", "/usr/bin/sh"),
+        ]
+    };
+
+    let mut seen_names = std::collections::HashSet::new();
+    let mut shells = Vec::new();
+
+    for (name, path) in candidates {
+        let full_path = if path.starts_with('/') || path.contains(':') || path.starts_with("C:\\") {
+            path.to_string()
+        } else {
+            // Try to find in PATH
+            which::which(path).map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+        };
+        
+        if !full_path.is_empty() && std::path::Path::new(&full_path).exists() && seen_names.insert(name.to_string()) {
+            shells.push(ShellInfo {
+                name: name.to_string(),
+                path: full_path.clone(),
+                is_default: full_path == default_shell || 
+                    (default_shell.is_empty() && shells.is_empty()),
+            });
+        }
+    }
+
+    // Ensure we have at least something
+    if shells.is_empty() {
+        if cfg!(target_os = "windows") {
+            shells.push(ShellInfo {
+                name: "PowerShell".to_string(),
+                path: "powershell.exe".to_string(),
+                is_default: true,
+            });
+        } else {
+            shells.push(ShellInfo {
+                name: "sh".to_string(),
+                path: "/bin/sh".to_string(),
+                is_default: true,
+            });
+        }
+    }
+
+    shells
 }
 
+/// Get the best available shell
+fn get_best_shell(preferred: Option<&str>) -> (String, String) {
+    let shells = detect_shells();
+    
+    if let Some(pref) = preferred {
+        // Try to find exact match first
+        for shell in &shells {
+            if shell.name.to_lowercase() == pref.to_lowercase() ||
+               shell.path.to_lowercase().contains(&pref.to_lowercase()) {
+                return (shell.name.clone(), shell.path.clone());
+            }
+        }
+    }
+    
+    // Return default or first available
+    for shell in &shells {
+        if shell.is_default {
+            return (shell.name.clone(), shell.path.clone());
+        }
+    }
+    
+    shells.first()
+        .map(|s| (s.name.clone(), s.path.clone()))
+        .unwrap_or_else(|| ("sh".to_string(), "/bin/sh".to_string()))
+}
+
+// ============================================================================
+// Process Tree Management
+// ============================================================================
+
+/// Kill a process and all its children
+#[cfg(unix)]
+fn kill_process_tree(pid: u32) -> Result<(), String> {
+    use std::process::Command;
+    
+    // Try to get child PIDs using pgrep (Linux/macOS)
+    let output = Command::new("pgrep")
+        .args(&["-P", &pid.to_string()])
+        .output();
+    
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if let Ok(child_pid) = line.trim().parse::<u32>() {
+                // Recursively kill children first
+                let _ = kill_process_tree(child_pid);
+            }
+        }
+    }
+    
+    // Kill the main process
+    unsafe {
+        let result = libc::kill(pid as i32, libc::SIGTERM);
+        if result != 0 {
+            // Try SIGKILL if SIGTERM fails
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    
+    // Use taskkill /T to kill process tree on Windows
+    let result = Command::new("taskkill")
+        .args(&["/F", "/T", "/PID", &pid.to_string()])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output();
+    
+    match result {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("taskkill failed: {}", stderr));
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to execute taskkill: {}", e)),
+    }
+}
+
+// ============================================================================
+// Tauri Commands
+// ============================================================================
+
+/// Spawn a new terminal/shell
 #[tauri::command]
-pub fn process_spawn(
+pub fn term_spawn(
     app: AppHandle,
     state: State<'_, Arc<ProcessStore>>,
-    executable: String,
+    shell: Option<String>,
+    cwd: Option<String>,
+    env: Option<HashMap<String, String>>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<TermHandle, String> {
+    let pty_system = native_pty_system();
+
+    let pty_cols = cols.unwrap_or(80);
+    let pty_rows = rows.unwrap_or(24);
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: pty_rows,
+            cols: pty_cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| format!("Failed to open PTY: {}", e))?;
+
+    // Get shell with auto-detection
+    let (shell_name, shell_path) = get_best_shell(shell.as_deref());
+
+    // Build command
+    let mut cmd = CommandBuilder::new(&shell_path);
+    
+    // Add login flag for Unix shells
+    let shell_basename = std::path::Path::new(&shell_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    
+    match shell_basename {
+        "zsh" | "bash" | "sh" | "fish" => {
+            cmd.arg("-l");
+        }
+        "powershell.exe" | "pwsh.exe" => {
+            cmd.arg("-NoExit");
+        }
+        _ => {}
+    }
+
+    // Set environment variables
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "SideX");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+
+    // Copy essential environment
+    for key in ["HOME", "USER", "PATH", "LANG", "SHELL"] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    
+    // Set LANG if not set
+    if std::env::var("LANG").is_err() {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+
+    // Set working directory
+    let cwd_str = cwd.unwrap_or_else(|| {
+        std::env::var("HOME").or_else(|_| std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string()))
+            .unwrap_or_else(|_| ".".to_string())
+    });
+    cmd.cwd(&cwd_str);
+
+    // Set custom environment variables
+    if let Some(env_vars) = env {
+        for (k, v) in env_vars {
+            cmd.env(k, v);
+        }
+    }
+
+    // Spawn the shell
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| format!("Failed to spawn shell '{}': {}", shell_path, e))?;
+
+    // Get PTY I/O handles
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to get PTY writer: {}", e))?;
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to get PTY reader: {}", e))?;
+
+    let pid = child.process_id().unwrap_or(0);
+    let handle = TermHandle::next();
+
+    // Create terminal instance
+    let (terminal, receiver) = Terminal::new(
+        handle,
+        shell_name.clone(),
+        cwd_str.clone(),
+        pair.master,
+        writer,
+        reader,
+        child,
+        pty_cols,
+        pty_rows,
+    );
+
+    // Store terminal
+    state.insert(handle, terminal, receiver);
+
+    // Emit term-started event
+    let _ = app.emit("term-started", TermStartedEvent {
+        handle,
+        shell: shell_name,
+        pid,
+        cwd: cwd_str,
+    });
+
+    Ok(handle)
+}
+
+/// Event emitted when terminal starts
+#[derive(Debug, Clone, Serialize)]
+struct TermStartedEvent {
+    handle: TermHandle,
+    shell: String,
+    pid: u32,
+    cwd: String,
+}
+
+/// Write input to terminal
+#[tauri::command]
+pub fn term_write(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    data: String,
+) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    terminal.write(&data)
+}
+
+/// Resize terminal (PTY)
+#[tauri::command]
+pub fn term_resize(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    terminal.resize(cols, rows)
+}
+
+/// Read terminal output (poll-based)
+#[tauri::command]
+pub fn term_read(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    max_lines: Option<usize>,
+) -> Result<TermReadResult, String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    // Process any pending messages from the receiver
+    if let Ok(receivers) = state.output_receivers.try_lock() {
+        if let Some(receiver) = receivers.get(&handle) {
+            loop {
+                match receiver.try_recv() {
+                    Ok(OutputMessage::Data(line)) => {
+                        terminal.output.lock().unwrap().push(line);
+                    }
+                    Ok(OutputMessage::Shutdown) => {
+                        terminal.is_alive.store(false, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    let mut output = terminal.output.lock().map_err(|e| e.to_string())?;
+    let lines = output.get_lines(max_lines);
+    let dropped = output.take_dropped_count();
+    let total = output.total_count();
+
+    Ok(TermReadResult {
+        lines,
+        dropped,
+        total,
+        is_alive: terminal.is_alive.load(Ordering::SeqCst),
+    })
+}
+
+/// Result of reading terminal output
+#[derive(Debug, Serialize)]
+pub struct TermReadResult {
+    pub lines: Vec<OutputLine>,
+    pub dropped: usize,
+    pub total: usize,
+    pub is_alive: bool,
+}
+
+/// Kill terminal and all child processes
+#[tauri::command]
+pub fn term_kill(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+) -> Result<(), String> {
+    let pid = {
+        let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+        let terminal = terminals
+            .get_mut(&handle)
+            .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+        terminal.pid()
+    };
+
+    // Kill process tree if we have a PID
+    if let Some(pid) = pid {
+        kill_process_tree(pid)?;
+    }
+
+    // Remove from store
+    if let Some(mut terminal) = state.remove(handle) {
+        // Try to kill directly as fallback
+        let _ = terminal.kill();
+    }
+
+    Ok(())
+}
+
+/// Get terminal info
+#[tauri::command]
+pub fn term_info(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+) -> Result<TermInfo, String> {
+    let terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    let pid = terminal.pid().unwrap_or(0);
+    let output = terminal.output.lock().map_err(|e| e.to_string())?;
+
+    Ok(TermInfo {
+        handle,
+        shell: terminal.shell.clone(),
+        cwd: terminal.cwd.clone(),
+        pid,
+        cols: terminal.cols,
+        rows: terminal.rows,
+        is_alive: terminal.is_alive.load(Ordering::SeqCst),
+        output_lines_total: output.total_count(),
+    })
+}
+
+/// List active terminals
+#[tauri::command]
+pub fn term_list(
+    state: State<'_, Arc<ProcessStore>>,
+) -> Result<Vec<TermHandle>, String> {
+    Ok(state.handles())
+}
+
+/// Get available shells
+#[tauri::command]
+pub fn term_get_shells() -> Result<Vec<ShellInfo>, String> {
+    Ok(detect_shells())
+}
+
+/// Check if a terminal is alive
+#[tauri::command]
+pub fn term_is_alive(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+) -> Result<bool, String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    // Check if process has exited
+    if terminal.is_alive.load(Ordering::SeqCst) {
+        match terminal.try_wait() {
+            Ok(Some(_)) => {
+                terminal.is_alive.store(false, Ordering::SeqCst);
+                Ok(false)
+            }
+            _ => Ok(true),
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+// ============================================================================
+// Simple Command Execution
+// ============================================================================
+
+/// Execute a simple command (non-interactive)
+#[tauri::command]
+pub async fn exec(
+    command: String,
     args: Vec<String>,
     cwd: Option<String>,
     env: Option<HashMap<String, String>>,
-) -> Result<u32, String> {
-    let mut cmd = Command::new(&executable);
-    cmd.args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    timeout_ms: Option<u64>,
+) -> Result<ExecResult, String> {
+    use tokio::process::Command;
+    use tokio::time::{timeout, Duration};
 
+    let timeout_duration = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_EXEC_TIMEOUT_MS));
+
+    let mut cmd = Command::new(&command);
+    cmd.args(&args);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    
+    // Set working directory
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
+    
+    // Set environment
     if let Some(env_vars) = env {
-        cmd.envs(env_vars);
+        for (k, v) in env_vars {
+            cmd.env(k, v);
+        }
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn '{}': {}", executable, e))?;
+    // Spawn the process
+    let mut child = cmd.spawn()
+        .map_err(|e| format!("Failed to spawn '{}': {}", command, e))?;
 
-    let stdin = child.stdin.take();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    // Wait with timeout
+    let result = timeout(timeout_duration, child.wait()).await;
 
-    let id = {
-        let mut next = state.next_id.lock().map_err(|e| e.to_string())?;
-        let id = *next;
-        *next += 1;
-        id
-    };
-
-    {
-        let mut procs = state.processes.lock().map_err(|e| e.to_string())?;
-        procs.insert(id, ProcessHandle { child, stdin });
-    }
-
-    let process_id = id;
-    let state_clone = state.inner().clone();
-
-    if let Some(stdout) = stdout {
-        let app_clone = app.clone();
-        let pid = process_id;
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(text) => {
-                        let _ = app_clone.emit(
-                            "process-stdout",
-                            ProcessStdoutEvent {
-                                process_id: pid,
-                                data: text,
-                            },
-                        );
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-
-    if let Some(stderr) = stderr {
-        let app_clone = app.clone();
-        let pid = process_id;
-        std::thread::spawn(move || {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                match line {
-                    Ok(text) => {
-                        let _ = app_clone.emit(
-                            "process-stderr",
-                            ProcessStderrEvent {
-                                process_id: pid,
-                                data: text,
-                            },
-                        );
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-    }
-
-    std::thread::spawn(move || {
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let mut procs = match state_clone.processes.lock() {
-                Ok(p) => p,
-                Err(_) => return,
-            };
-            if let Some(handle) = procs.get_mut(&process_id) {
-                match handle.child.try_wait() {
-                    Ok(Some(status)) => {
-                        let _ = app.emit(
-                            "process-exit",
-                            ProcessExitEvent {
-                                process_id,
-                                exit_code: status.code(),
-                            },
-                        );
-                        procs.remove(&process_id);
-                        return;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        let _ = app.emit(
-                            "process-exit",
-                            ProcessExitEvent {
-                                process_id,
-                                exit_code: None,
-                            },
-                        );
-                        procs.remove(&process_id);
-                        return;
-                    }
-                }
+    match result {
+        Ok(Ok(status)) => {
+            // Process completed
+            let stdout = if let Some(mut stdout) = child.stdout.take() {
+                let mut buf = String::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stdout.read_to_string(&mut buf).await;
+                buf
             } else {
-                return;
-            }
-        }
-    });
+                String::new()
+            };
 
-    Ok(id)
-}
+            let stderr = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = String::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stderr.read_to_string(&mut buf).await;
+                buf
+            } else {
+                String::new()
+            };
 
-#[tauri::command]
-pub fn process_write(
-    state: State<'_, Arc<ProcessStore>>,
-    process_id: u32,
-    data: String,
-) -> Result<(), String> {
-    let mut procs = state.processes.lock().map_err(|e| e.to_string())?;
-    let handle = procs
-        .get_mut(&process_id)
-        .ok_or_else(|| format!("Process {} not found", process_id))?;
-
-    if let Some(ref mut stdin) = handle.stdin {
-        stdin
-            .write_all(data.as_bytes())
-            .map_err(|e| format!("Failed to write to process {}: {}", process_id, e))?;
-        stdin
-            .flush()
-            .map_err(|e| format!("Failed to flush process {}: {}", process_id, e))?;
-        Ok(())
-    } else {
-        Err(format!("Process {} stdin not available", process_id))
-    }
-}
-
-#[tauri::command]
-pub fn process_kill(
-    state: State<'_, Arc<ProcessStore>>,
-    process_id: u32,
-) -> Result<(), String> {
-    let mut procs = state.processes.lock().map_err(|e| e.to_string())?;
-    let mut handle = procs
-        .remove(&process_id)
-        .ok_or_else(|| format!("Process {} not found", process_id))?;
-
-    handle
-        .child
-        .kill()
-        .map_err(|e| format!("Failed to kill process {}: {}", process_id, e))
-}
-
-#[tauri::command]
-pub async fn process_exec(
-    command: String,
-    cwd: Option<String>,
-    timeout: Option<u64>,
-) -> Result<ProcessResult, String> {
-    let result = tokio::task::spawn_blocking(move || {
-        let shell = if cfg!(target_os = "windows") {
-            "cmd"
-        } else {
-            "sh"
-        };
-        let flag = if cfg!(target_os = "windows") {
-            "/C"
-        } else {
-            "-c"
-        };
-
-        let mut cmd = Command::new(shell);
-        cmd.arg(flag).arg(&command);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("Failed to exec '{}': {}", command, e))?;
-
-        if let Some(timeout_ms) = timeout {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let handle = std::thread::spawn(move || child.wait_with_output());
-            match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
-                Ok(_) => unreachable!(),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    drop(tx);
-                    match handle.join() {
-                        Ok(Ok(output)) => Ok(ProcessResult {
-                            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                            exit_code: output.status.code(),
-                        }),
-                        Ok(Err(e)) => Err(format!("Process error: {}", e)),
-                        Err(_) => Err("Process thread panicked".to_string()),
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    match handle.join() {
-                        Ok(Ok(output)) => Ok(ProcessResult {
-                            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                            exit_code: output.status.code(),
-                        }),
-                        Ok(Err(e)) => Err(format!("Process error: {}", e)),
-                        Err(_) => Err("Process thread panicked".to_string()),
-                    }
-                }
-            }
-        } else {
-            let output = child
-                .wait_with_output()
-                .map_err(|e| format!("Failed to wait for '{}': {}", command, e))?;
-
-            Ok(ProcessResult {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code(),
+            Ok(ExecResult {
+                stdout,
+                stderr,
+                exit_code: status.code(),
+                timed_out: false,
             })
         }
-    })
-    .await
-    .map_err(|e| format!("Task join error: {}", e))?;
+        Ok(Err(e)) => {
+            // Process error
+            Err(format!("Process error: {}", e))
+        }
+        Err(_) => {
+            // Timeout - kill the process
+            let _ = child.kill().await;
+            
+            // Try to get any output before killing
+            let stdout = if let Some(mut stdout) = child.stdout.take() {
+                let mut buf = String::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stdout.read_to_string(&mut buf).await;
+                buf
+            } else {
+                String::new()
+            };
 
-    result
+            let stderr = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = String::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stderr.read_to_string(&mut buf).await;
+                buf
+            } else {
+                String::new()
+            };
+
+            Ok(ExecResult {
+                stdout,
+                stderr,
+                exit_code: None,
+                timed_out: true,
+            })
+        }
+    }
 }
 
+// ============================================================================
+// Additional Utility Commands
+// ============================================================================
+
+/// Clear terminal output buffer
 #[tauri::command]
-pub fn process_exec_sync(
-    command: String,
-    cwd: Option<String>,
-) -> Result<ProcessResult, String> {
-    let shell = if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "sh"
-    };
-    let flag = if cfg!(target_os = "windows") {
-        "/C"
-    } else {
-        "-c"
-    };
+pub fn term_clear_buffer(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
 
-    let mut cmd = Command::new(shell);
-    cmd.arg(flag).arg(&command);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    *terminal.output.lock().map_err(|e| e.to_string())? = 
+        RingBuffer::new(DEFAULT_RING_BUFFER_CAPACITY);
+    
+    Ok(())
+}
 
-    if let Some(dir) = cwd {
-        cmd.current_dir(dir);
+/// Send signal to terminal process (Unix only)
+#[cfg(unix)]
+#[tauri::command]
+pub fn term_signal(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    signal: i32,
+) -> Result<(), String> {
+    let terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    if let Some(pid) = terminal.pid() {
+        unsafe {
+            let result = libc::kill(pid as i32, signal);
+            if result != 0 {
+                return Err(format!("Failed to send signal {} to {}", signal, pid));
+            }
+        }
     }
+    
+    Ok(())
+}
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to exec '{}': {}", command, e))?;
+#[cfg(not(unix))]
+#[tauri::command]
+pub fn term_signal(
+    _state: State<'_, Arc<ProcessStore>>,
+    _handle: TermHandle,
+    _signal: i32,
+) -> Result<(), String> {
+    Err("Signals are only supported on Unix systems".to_string())
+}
 
-    Ok(ProcessResult {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code(),
-    })
+/// Set environment variable for a specific terminal
+#[tauri::command]
+pub fn term_set_env(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    // Note: PTY environment can't be changed after spawn
+    // This is a placeholder for potential future implementation
+    // (e.g., using shell-specific escape sequences)
+    let _ = (state, handle, key, value);
+    Ok(())
+}
+
+/// Change terminal working directory (via shell command)
+#[tauri::command]
+pub fn term_set_cwd(
+    state: State<'_, Arc<ProcessStore>>,
+    handle: TermHandle,
+    cwd: String,
+) -> Result<(), String> {
+    let mut terminals = state.terminals.lock().map_err(|e| e.to_string())?;
+    let terminal = terminals
+        .get_mut(&handle)
+        .ok_or_else(|| format!("Terminal {:?} not found", handle))?;
+
+    // Send cd command via shell
+    let cd_cmd = format!("cd '{}'\n", cwd.replace('\\', "\\\\").replace('\'', "'\"'\"'"));
+    terminal.write(&cd_cmd)?;
+    terminal.cwd = cwd;
+    
+    Ok(())
 }

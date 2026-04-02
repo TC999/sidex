@@ -124,6 +124,9 @@ export class ViewLines extends ViewPart implements IViewLines {
 	private _isScrolling = false;
 	private readonly _scrollEndScheduler: RunOnceScheduler;
 	private _cachedLineWidths = new Map<number, number>();
+	
+	// PERFORMANCE: Limit cache size to prevent memory bloat
+	private readonly _maxCachedLineWidths = 100;
 
 	private _horizontalRevealRequest: HorizontalRevealRequest | null;
 	private readonly _lastRenderedData: LastRenderedData;
@@ -330,13 +333,19 @@ export class ViewLines extends ViewPart implements IViewLines {
 			this._isScrolling = true;
 			// DELAY scheduler to reduce overhead during active scrolling
 			this._scrollEndScheduler.schedule();
-			// Clear cached widths during scroll to reduce memory pressure
-			if (this._cachedLineWidths.size > 50) {
+			// PERFORMANCE: Aggressive cache cleanup during scroll
+			if (this._cachedLineWidths.size > this._maxCachedLineWidths) {
+				// Delete oldest 50% instead of full clear to maintain some performance
+				const entries = Array.from(this._cachedLineWidths.entries());
 				this._cachedLineWidths.clear();
+				for (let i = Math.floor(entries.length / 2); i < entries.length; i++) {
+					this._cachedLineWidths.set(entries[i][0], entries[i][1]);
+				}
 			}
 		}
-		// DEFER width updates during scroll
-		if (!this._isScrolling) {
+		// PERFORMANCE: Skip width updates during active scrolling
+		// Width will be updated when scroll ends via _scrollEndScheduler
+		if (!this._isScrolling && e.scrollWidthChanged) {
 			this.domNode.setWidth(e.scrollWidth);
 		}
 		return this._visibleLines.onScrollChanged(e) || e.scrollTopChanged || e.scrollLeftChanged;
