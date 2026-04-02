@@ -2035,9 +2035,12 @@ export class SettingsEditor2 extends EditorPane {
 			: 'none';
 
 		if (!this.searchResultModel) {
-			if (this.countElement.style.display !== 'none') {
+			if (this.searchResultLabel !== null) {
 				this.searchResultLabel = null;
 				this.updateInputAriaLabel();
+			}
+
+			if (this.countElement.style.display !== 'none') {
 				this.countElement.style.display = 'none';
 				this.countElement.innerText = '';
 				this.layout(this.dimension);
