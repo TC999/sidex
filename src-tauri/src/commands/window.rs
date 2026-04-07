@@ -99,10 +99,31 @@ pub fn restore_and_show(app: &tauri::App, db: &StorageDb) {
 
     if let Ok(Some(json)) = db.get(WINDOW_STATE_KEY) {
         if let Ok(state) = serde_json::from_str::<WindowState>(&json) {
-            let _ = window.set_position(tauri::PhysicalPosition::new(state.x, state.y));
-            let _ = window.set_size(tauri::PhysicalSize::new(state.width, state.height));
-            if state.maximized {
-                let _ = window.maximize();
+            // Only restores position if it lands on an available monitor.
+            let on_screen = app
+                .available_monitors()
+                .ok()
+                .map(|monitors| {
+                    monitors.iter().any(|m| {
+                        let pos = m.position();
+                        let size = m.size();
+                        let right = pos.x + size.width as i32;
+                        let bottom = pos.y + size.height as i32;
+                        // Require at least 100x50px of the window to be visible
+                        state.x + 100 < right
+                            && state.x + state.width as i32 > pos.x + 100
+                            && state.y + 50 < bottom
+                            && state.y > pos.y - 50
+                    })
+                })
+                .unwrap_or(false);
+
+            if on_screen {
+                let _ = window.set_size(tauri::PhysicalSize::new(state.width, state.height));
+                let _ = window.set_position(tauri::PhysicalPosition::new(state.x, state.y));
+                if state.maximized {
+                    let _ = window.maximize();
+                }
             }
         }
     }

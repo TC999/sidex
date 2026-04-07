@@ -3,6 +3,8 @@
  *  Entry point. Globals set by inline script in index.html.
  *--------------------------------------------------------------------------------------------*/
 
+import { loadNlsMessages } from './nls-loader.js';
+
 async function sidexOpenFolder() {
 	try {
 		const { open } = await import('@tauri-apps/plugin-dialog');
@@ -24,6 +26,9 @@ function navigateToFolder(folderUri: string) {
 }
 
 async function boot() {
+	// Load locale translations before any VS Code module imports
+    await loadNlsMessages();
+
 	const stages = [
 		['common',       () => import('./vs/workbench/workbench.common.main.js')],
 		['web.main',     () => import('./vs/workbench/browser/web.main.js')],
@@ -178,6 +183,7 @@ async function boot() {
 	setupTauriExternalOpener();
 	setupMenuActions();
 	setupWindowStateSave();
+	setupNativeWindowDragging();
 
 	console.log('[SideX] Workbench created' + (folderParam ? ` (folder: ${folderParam})` : ' (no folder)'), 'workspace:', workspace);
 }
@@ -218,6 +224,27 @@ function setupWindowStateSave() {
 			invoke('save_window_state', { label: 'main' }).catch(() => {});
 		});
 	}).catch(() => {});
+}
+
+function setupNativeWindowDragging() {
+	let appWindow: { startDragging(): Promise<void> } | null = null;
+	import('@tauri-apps/api/window')
+		.then(mod => { appWindow = mod.getCurrentWindow(); })
+		.catch(() => {});
+
+	document.addEventListener('mousedown', (e: MouseEvent) => {
+		if (e.button !== 0 || !appWindow) {
+			return;
+		}
+		const target = e.target as HTMLElement | null;
+		if (!target?.closest('.part.titlebar')) {
+			return;
+		}
+		if (target.closest('a, button, input, select, textarea, .action-item, .command-center, .window-controls-container')) {
+			return;
+		}
+		appWindow.startDragging().catch(() => {});
+	}, true);
 }
 
 function setupMenuActions() {

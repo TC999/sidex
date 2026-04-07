@@ -1,10 +1,12 @@
 import { defineConfig } from 'vite';
 import * as path from 'path';
+import { nlsPlugin } from './scripts/vite-plugin-nls';
 
 export default defineConfig({
   clearScreen: false,
   assetsInclude: ['**/*.wasm', '**/*.json', '**/*.tmLanguage.json'],
   publicDir: 'public',
+  plugins: [nlsPlugin()],
   server: {
     port: 1420,
     strictPort: true,
