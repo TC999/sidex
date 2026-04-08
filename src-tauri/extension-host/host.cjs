@@ -802,11 +802,29 @@ function createVscodeShim() {
     showWarningMessage(msg, ...rest) {
       log(`[warn] ${msg}`);
       host.emit('event', { type: 'showMessage', severity: 'warning', message: msg });
+      const items = rest.filter(r => typeof r === 'string' || (typeof r === 'object' && r !== null));
+      if (items.length) {
+        return new Promise((resolve) => {
+          const reqId = ++host._reqId;
+          host._pendingRequests.set(reqId, resolve);
+          host.emit('event', { type: 'showMessageRequest', id: reqId, severity: 'warning', message: msg, items: items.map(i => typeof i === 'string' ? i : i.title) });
+          setTimeout(() => { if (host._pendingRequests.has(reqId)) { host._pendingRequests.delete(reqId); resolve(undefined); } }, 30000);
+        });
+      }
       return Promise.resolve(undefined);
     },
     showErrorMessage(msg, ...rest) {
       log(`[error] ${msg}`);
       host.emit('event', { type: 'showMessage', severity: 'error', message: msg });
+      const items = rest.filter(r => typeof r === 'string' || (typeof r === 'object' && r !== null));
+      if (items.length) {
+        return new Promise((resolve) => {
+          const reqId = ++host._reqId;
+          host._pendingRequests.set(reqId, resolve);
+          host.emit('event', { type: 'showMessageRequest', id: reqId, severity: 'error', message: msg, items: items.map(i => typeof i === 'string' ? i : i.title) });
+          setTimeout(() => { if (host._pendingRequests.has(reqId)) { host._pendingRequests.delete(reqId); resolve(undefined); } }, 30000);
+        });
+      }
       return Promise.resolve(undefined);
     },
     createOutputChannel(name, opts) {
@@ -851,6 +869,7 @@ function createVscodeShim() {
     registerTreeDataProvider: () => noopDisposable,
     createTreeView: () => ({ onDidExpandElement: noopEvent, onDidCollapseElement: noopEvent, selection: [], onDidChangeSelection: noopEvent, visible: true, onDidChangeVisibility: noopEvent, message: '', title: '', description: '', reveal() { return Promise.resolve(); }, dispose() {} }),
     registerWebviewPanelSerializer: () => noopDisposable,
+    registerWebviewViewProvider: () => noopDisposable,
     registerCustomEditorProvider: () => noopDisposable,
     registerUriHandler: () => noopDisposable,
     registerFileDecorationProvider: () => noopDisposable,
@@ -926,7 +945,43 @@ function createVscodeShim() {
   };
 
   const scm = {
-    createSourceControl: () => ({ inputBox: { value: '', placeholder: '' }, createResourceGroup: () => ({ resourceStates: [], dispose() {} }), dispose() {} }),
+    createSourceControl(id, label, rootUri) {
+      const sc = {
+        id,
+        label,
+        rootUri: rootUri || undefined,
+        inputBox: {
+          value: '',
+          placeholder: '',
+          enabled: true,
+          visible: true,
+          validateInput: undefined,
+        },
+        count: 0,
+        quickDiffProvider: undefined,
+        commitTemplate: undefined,
+        acceptInputCommand: undefined,
+        statusBarCommands: undefined,
+        onDidChangeCommitTemplate: noopEvent,
+        onDidChangeStatusBarCommands: noopEvent,
+        onInputBoxValueChange: noopEvent,
+        createResourceGroup(id, label) {
+          const group = {
+            id,
+            label,
+            hideWhenEmpty: undefined,
+            resourceStates: [],
+            onDidChange: noopEvent,
+            dispose() {},
+          };
+          return group;
+        },
+        dispose() {},
+      };
+      host.emit('event', { type: 'scmSourceControlCreated', id, label });
+      return sc;
+    },
+    inputBox: { value: '', placeholder: '' },
   };
 
   const comments = {
@@ -974,7 +1029,9 @@ function createVscodeShim() {
     RelativePattern: class { constructor(base, pattern) { this.baseUri = typeof base === 'string' ? VscUri.file(base) : (base.uri || base); this.base = typeof base === 'string' ? base : (base.uri?.fsPath || base.fsPath || ''); this.pattern = pattern; } },
     ShellExecution: class { constructor(commandLine, args, options) { this.commandLine = commandLine; this.args = args; this.options = options; } },
     ProcessExecution: class { constructor(process, args, options) { this.process = process; this.args = args; this.options = options; } },
-    Task: class { constructor(definition, scope, name, source, execution) { this.definition = definition; this.scope = scope; this.name = name; this.source = source; this.execution = execution; } },
+    CustomExecution: class { constructor(callback) { this.callback = callback; } },
+    Task: class { constructor(definition, scope, name, source, execution, problemMatchers) { this.definition = definition; this.scope = scope; this.name = name; this.source = source; this.execution = execution; this.problemMatchers = problemMatchers || []; this.isBackground = false; this.presentationOptions = {}; this.runOptions = {}; this.group = undefined; } },
+    TaskScope: { Global: 1, Workspace: 2 },
     TaskGroup: { Build: { id: 'build' }, Test: { id: 'test' }, Clean: { id: 'clean' }, Rebuild: { id: 'rebuild' } },
     TaskPanelKind: { Shared: 1, Dedicated: 2, New: 3 },
     TaskRevealKind: { Always: 1, Silent: 2, Never: 3 },
