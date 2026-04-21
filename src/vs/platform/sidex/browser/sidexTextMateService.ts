@@ -142,6 +142,22 @@ export class NativeTextMate {
 			{ scopeName, lineText, prevStack, timeLimitMs }
 		);
 	}
+	
+	async tokenizeDocument(
+		scopeName: string,
+		lines: string[],
+		startStack?: number,
+		timeLimitMs?: number
+	): Promise<{ lines: NativeTokenizeLineBinaryResult[]; finalStack: number } | undefined> {
+		const invoke = await this._invoke;
+		if (!invoke) {
+			return undefined;
+		}
+		return invoke<{ lines: NativeTokenizeLineBinaryResult[]; finalStack: number }>(
+			'textmate_tokenize_document',
+			{ scopeName, lines, startStack, timeLimitMs }
+		);
+	}
 
 	/**
 	 * Frees a rule-stack handle on the Rust side. Invoke this when

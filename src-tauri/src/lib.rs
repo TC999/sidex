@@ -406,6 +406,16 @@ pub fn run() {
             restore_and_show(app, &db);
 
             app.manage(Arc::new(db));
+            
+            {
+                let settings_store = app.state::<Arc<SettingsStore>>();
+                let user_settings_path = app_data.join("UserData").join("User").join("settings.json");
+                if user_settings_path.exists() {
+                    if let Err(e) = settings_store.load_user(&user_settings_path) {
+                        log::warn!("failed to pre-load user settings: {e}");
+                    }
+                }
+            }
 
             let sidex_db_path = app_data.join("sidex_state.db");
             let sidex_db = sidex_db::Database::open(&sidex_db_path)
@@ -566,7 +576,8 @@ pub fn run() {
             commands::textmate_load_grammar,
             commands::textmate_update_theme,
             commands::textmate_tokenize_line,
-            commands::textmate_tokenize_line_binary,
+		commands::textmate_tokenize_line_binary,
+            commands::textmate_tokenize_document,
             commands::textmate_release_stack,
             commands::get_os_info,
             commands::get_env,

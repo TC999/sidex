@@ -25,6 +25,7 @@ import {
 	generateTokensCSSForColorMap,
 	generateTokensCSSForFontMap,
 } from '../../../../editor/common/languages/supports/tokenization.js';
+import { ITextModel } from '../../../../editor/common/model.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IExtensionResourceLoaderService } from '../../../../platform/extensionResourceLoader/common/extensionResourceLoader.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -40,6 +41,7 @@ import { getNativeTextMate } from '../../../../platform/sidex/browser/sidexTextM
 import { ITextMateTokenizationService } from './textMateTokenizationFeature.js';
 import type { IGrammar } from 'vscode-textmate';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { ContiguousMultilineTokensBuilder } from '../../../../editor/common/tokens/contiguousMultilineTokensBuilder.js';
 
 // ---------------------------------------------------------------------------
 // Native tokenizer state — wraps an opaque Rust rule-stack handle.
@@ -61,26 +63,175 @@ class NativeTokenizerState implements IState {
 }
 
 // ---------------------------------------------------------------------------
+// Background tokenizer — runs sequentially through all lines and pushes
+// results directly into the store without touching TokenizationRegistry.
+// ---------------------------------------------------------------------------
+
+class SidexNativeBackgroundTokenizer implements IBackgroundTokenizer {
+	private _disposed = false;
+	private _running = false;
+	/** Next line to start tokenizing from (1-indexed). */
+	private _pendingStart = 1;
+
+	private readonly _contentChangeDisposable: IDisposable;
+
+	constructor(
+		private readonly _textModel: ITextModel,
+		private readonly _store: IBackgroundTokenizationStore,
+		private readonly _scopeName: string,
+		private readonly _encodedLanguageId: LanguageId,
+		private readonly _maxTokenizationLineLength: IObservable<number>,
+	) {
+		// Whenever the document changes, re-tokenize from the earliest touched line.
+		this._contentChangeDisposable = this._textModel.onDidChangeContent(e => {
+			if (this._disposed) {
+				return;
+			}
+			// Changes are ordered end-to-start; find the minimum start line.
+			let minLine = this._textModel.getLineCount();
+			for (const change of e.changes) {
+				if (change.range.startLineNumber < minLine) {
+					minLine = change.range.startLineNumber;
+				}
+			}
+			this.requestTokens(minLine, this._textModel.getLineCount() + 1);
+		});
+
+		// Kick off an initial full-file tokenization pass.
+		this._scheduleRun();
+	}
+
+	requestTokens(startLineNumber: number, _endLineNumberExclusive: number): void {
+		if (this._disposed) {
+			return;
+		}
+		this._pendingStart = Math.min(this._pendingStart, startLineNumber);
+		this._scheduleRun();
+	}
+
+	dispose(): void {
+		this._disposed = true;
+		this._contentChangeDisposable.dispose();
+	}
+
+	private _scheduleRun(): void {
+		if (this._running) {
+			// A run is already in progress; it will pick up _pendingStart when it
+			// loops back and checks for new work.
+			return;
+		}
+		this._running = true;
+		this._run().finally(() => {
+			this._running = false;
+			// If new work arrived while we were running, start another pass.
+			if (!this._disposed && this._pendingStart <= this._textModel.getLineCount()) {
+				this._scheduleRun();
+			}
+		});
+	}
+
+	private async _run(): Promise<void> {
+		const startLine = this._pendingStart;
+		this._pendingStart = this._textModel.getLineCount() + 1;
+
+		const maxLen = this._maxTokenizationLineLength.get();
+		const lineCount = this._textModel.getLineCount();
+		const native = getNativeTextMate();
+
+		// ── Phase 1: recover the rule-stack handle at startLine - 1 ──────────
+		// For the common case (startLine === 1) the handle is 0 (initial state)
+		// and we skip this entirely.
+		let startHandle = 0;
+		if (startLine > 1) {
+			// Tokenize lines 1..(startLine-1) in ONE batch call to get the
+			// start-state handle. We don't push these tokens into the store
+			// (they're already there from a previous pass).
+			const warmupLines: string[] = [];
+			for (let ln = 1; ln < startLine; ln++) {
+				const text = this._textModel.getLineContent(ln);
+				warmupLines.push(maxLen > 0 && text.length >= maxLen ? '' : text);
+			}
+			if (warmupLines.length > 0 && !this._disposed) {
+				try {
+					const warmup = await native.tokenizeDocument(
+						this._scopeName,
+						warmupLines,
+						undefined,
+					);
+					if (warmup && warmup.lines.length > 0) {
+						startHandle = warmup.finalStack;
+					}
+				} catch { /* fall through with handle=0 */ }
+			}
+		}
+
+		if (this._disposed) { return; }
+
+		// ── Phase 2: tokenize from startLine to end in CHUNK_SIZE-line batches ─
+		// Each chunk is ONE IPC call instead of one call per line.
+		// Chunks of 200 lines keep each round-trip fast and let the UI update
+		// in between (we yield with a 0-ms timeout between chunks).
+		const CHUNK_SIZE = 200;
+		let handle = startHandle;
+
+		for (let chunkStart = startLine; chunkStart <= lineCount; chunkStart += CHUNK_SIZE) {
+			if (this._disposed) { return; }
+
+			const chunkEnd = Math.min(chunkStart + CHUNK_SIZE - 1, lineCount);
+			const chunkLines: string[] = [];
+			for (let ln = chunkStart; ln <= chunkEnd; ln++) {
+				const text = this._textModel.getLineContent(ln);
+				chunkLines.push(maxLen > 0 && text.length >= maxLen ? '' : text);
+			}
+
+			let chunkResults: { tokens: number[]; ruleStack: number }[] | undefined;
+			try {
+				const response = await native.tokenizeDocument(
+					this._scopeName,
+					chunkLines,
+					handle === 0 ? undefined : handle,
+				);
+				if (response) {
+					chunkResults = response.lines;
+					handle = response.finalStack;
+				}
+			} catch { /* fall through */ }
+
+			if (this._disposed) { return; }
+
+			// Push the chunk into the store in one shot.
+			const builder = new ContiguousMultilineTokensBuilder();
+			for (let i = 0; i < chunkLines.length; i++) {
+				const ln = chunkStart + i;
+				const result = chunkResults?.[i];
+				if (!result) {
+					this._store.setEndState(ln, new NativeTokenizerState(0));
+					builder.add(ln, nullTokenizeEncoded(this._encodedLanguageId, NativeTokenizerState.INITIAL).tokens);
+				} else {
+					this._store.setEndState(ln, new NativeTokenizerState(result.ruleStack));
+					builder.add(ln, new Uint32Array(result.tokens));
+				}
+			}
+			this._store.setTokens(builder.finalize());
+
+			// Yield between chunks so the editor can render what we just pushed.
+			if (chunkEnd < lineCount) {
+				await new Promise<void>(resolve => setTimeout(resolve, 0));
+			}
+		}
+
+		if (!this._disposed) {
+			this._store.backgroundTokenizationFinished();
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Per-language tokenization support
 // ---------------------------------------------------------------------------
 
-interface PrefetchEntry {
-	tokens: Uint32Array;
-	nextHandle: number;
-}
-
 class SidexNativeTokenizationSupport implements ITokenizationSupport, IDisposable {
-	/** Primary cache: `"<handle>:<line>"` → fresh result (consumed once, then cleared). */
-	private readonly _cache = new Map<string, PrefetchEntry>();
-	/** Stale cache: last-known good tokens for a key, never cleared on read. */
-	private readonly _stale = new Map<string, PrefetchEntry>();
-	/** Tracks pending async calls so we don't double-fire. */
-	private readonly _inflight = new Set<string>();
-	/** Pending handleChange — debounced so one burst of misses = one re-render pass. */
-	private _changeTimer: ReturnType<typeof setTimeout> | undefined;
-
 	constructor(
-		private readonly _languageId: string,
 		private readonly _scopeName: string,
 		private readonly _encodedLanguageId: LanguageId,
 		private readonly _maxTokenizationLineLength: IObservable<number>,
@@ -94,101 +245,29 @@ class SidexNativeTokenizationSupport implements ITokenizationSupport, IDisposabl
 		throw new Error('SidexNativeTokenizationSupport: plain tokenize() not supported');
 	}
 
-	tokenizeEncoded(line: string, _hasEOL: boolean, state: IState): EncodedTokenizationResult {
-		const maxLen = this._maxTokenizationLineLength.get();
-		if (maxLen > 0 && line.length >= maxLen) {
-			return nullTokenizeEncoded(this._encodedLanguageId, state);
-		}
-
-		const handle = state instanceof NativeTokenizerState ? state.handle : 0;
-		const key = `${handle}:${line}`;
-
-		// Fresh cache hit — consume it and advance the state.
-		const cached = this._cache.get(key);
-		if (cached) {
-			this._cache.delete(key);
-			// Update stale cache so future misses have something useful to show.
-			this._stale.set(key, cached);
-			return new EncodedTokenizationResult(
-				cached.tokens,
-				[],
-				new NativeTokenizerState(cached.nextHandle),
-			);
-		}
-
-		// Schedule background fetch.
-		this._schedulePrefetch(key, handle, line);
-
-		// Stale-while-revalidate: return last-known tokens so the line never
-		// goes plain while the async fetch is in flight.  This eliminates the
-		// "flicker to uncolored" effect on scroll / file open.
-		const stale = this._stale.get(key);
-		if (stale) {
-			return new EncodedTokenizationResult(
-				stale.tokens,
-				[],
-				new NativeTokenizerState(stale.nextHandle),
-			);
-		}
-
-		// True first miss — return null tokens for now.
+	tokenizeEncoded(_line: string, _hasEOL: boolean, state: IState): EncodedTokenizationResult {
+		// The background tokenizer handles all real tokenization.  This synchronous
+		// path is only called as a fallback while background results are pending;
+		// returning null tokens here is correct and avoids flicker because the
+		// background tokenizer pushes real tokens via setTokens/setEndState.
 		return nullTokenizeEncoded(this._encodedLanguageId, state);
 	}
 
 	createBackgroundTokenizer(
-		_textModel: unknown,
-		_store: IBackgroundTokenizationStore,
+		textModel: ITextModel,
+		store: IBackgroundTokenizationStore,
 	): IBackgroundTokenizer | undefined {
-		return undefined;
+		return new SidexNativeBackgroundTokenizer(
+			textModel,
+			store,
+			this._scopeName,
+			this._encodedLanguageId,
+			this._maxTokenizationLineLength,
+		);
 	}
 
-	private _schedulePrefetch(key: string, handle: number, line: string): void {
-		if (this._inflight.has(key)) {
-			return;
-		}
-		this._inflight.add(key);
-		getNativeTextMate()
-			.tokenizeLineBinary(this._scopeName, line, handle === 0 ? undefined : handle)
-			.then(result => {
-				this._inflight.delete(key);
-				if (!result) {
-					return;
-				}
-				this._cache.set(key, {
-					tokens: new Uint32Array(result.tokens),
-					nextHandle: result.ruleStack,
-				});
-				// Debounce re-tokenize: wait 16 ms (one frame) so a burst of
-				// incoming results from fast scrolling fires a single pass
-				// instead of one per line.
-				if (this._changeTimer !== undefined) {
-					clearTimeout(this._changeTimer);
-				}
-				this._changeTimer = setTimeout(() => {
-					this._changeTimer = undefined;
-					TokenizationRegistry.handleChange([this._languageId]);
-				}, 16);
-			})
-			.catch(() => {
-				this._inflight.delete(key);
-			});
-	}
-
-	/** Release all Rust stack handles referenced by the cache. */
 	dispose(): void {
-		if (this._changeTimer !== undefined) {
-			clearTimeout(this._changeTimer);
-			this._changeTimer = undefined;
-		}
-		const native = getNativeTextMate();
-		for (const entry of this._cache.values()) {
-			if (entry.nextHandle !== 0) {
-				native.releaseStack(entry.nextHandle);
-			}
-		}
-		this._cache.clear();
-		this._stale.clear();
-		this._inflight.clear();
+		// Nothing to release — all per-model state lives in SidexNativeBackgroundTokenizer.
 	}
 }
 
@@ -340,7 +419,7 @@ export class SidexTextMateTokenizationFeature extends Disposable implements ITex
 			-1,
 		);
 
-		return new SidexNativeTokenizationSupport(languageId, scopeName, encodedLanguageId, maxTokenizationLineLength);
+		return new SidexNativeTokenizationSupport(scopeName, encodedLanguageId, maxTokenizationLineLength);
 	}
 
 	// -------------------------------------------------------------------------
@@ -382,10 +461,6 @@ export class SidexTextMateTokenizationFeature extends Disposable implements ITex
 				: {},
 		}));
 
-		// Rust expects `colorMap` as `Option<Vec<String>>`; the VS Code
-		// token color map can have null/undefined entries at indices
-		// with no assigned color. Replace them with an empty string so
-		// serde's `Vec<String>` deserializer doesn't reject null values.
 		// Rust expects `colorMap` as `Option<Vec<String>>`.  VS Code's
 		// tokenColorMap is a *sparse* array — indices with no color are holes
 		// (not null), and Array.prototype.map skips holes leaving them as
@@ -401,7 +476,6 @@ export class SidexTextMateTokenizationFeature extends Disposable implements ITex
 			},
 		);
 
-		// Remove debug block now that we know the cause
 		getNativeTextMate()
 			.updateTheme(nativeSettings, colorMapArg)
 			.catch(err => {

@@ -1,16 +1,16 @@
 /*---------------------------------------------------------------------------------------------
  *  SideX — Remote Explorer pane.
  *
- *  Shows SSH hosts, WSL distros, Dev Containers, GitHub Codespaces, and
- *  Tunnels in a tree that mirrors VS Code's Remote Explorer.  Each section
- *  can be expanded / collapsed; items have contextual action buttons.
+ *  Uses VS Code's standard tree-view infrastructure (WorkbenchAsyncDataTree)
+ *  to show SSH hosts, WSL distros, Dev Containers, Codespaces, and Tunnels
+ *  in a proper tree with collapsible sections and icon-label rows.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/remoteExplorer.css';
 
 import { localize } from '../../../../nls.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IViewletViewOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
+import { IViewPaneOptions, ViewPane } from '../../../browser/parts/views/viewPane.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
@@ -20,23 +20,164 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
-import { append, $, addDisposableListener, EventType, clearNode } from '../../../../base/browser/dom.js';
 import { ISideXRemoteService, SshHost, WslDistro, ContainerEntry, CodespaceEntry, RemoteKind } from '../../../../platform/sidex/browser/sidexRemoteService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { localize2 } from '../../../../nls.js';
+import { WorkbenchAsyncDataTree } from '../../../../platform/list/browser/listService.js';
+import { IListVirtualDelegate } from '../../../../base/browser/ui/list/list.js';
+import { ITreeRenderer, ITreeNode, IAsyncDataSource } from '../../../../base/browser/ui/tree/tree.js';
+import * as dom from '../../../../base/browser/dom.js';
+import { IListAccessibilityProvider } from '../../../../base/browser/ui/list/listWidget.js';
+
+// ── Tree data model ─────────────────────────────────────────────────────────
+
+type RemoteTreeElement = RemoteSectionItem | RemoteLeafItem;
+
+interface RemoteSectionItem {
+	kind: 'section';
+	id: string;
+	label: string;
+	icon: ThemeIcon;
+	children: RemoteLeafItem[];
+}
+
+interface RemoteLeafItem {
+	kind: 'leaf';
+	id: string;
+	label: string;
+	description?: string;
+	icon: ThemeIcon;
+	active: boolean;
+	actionLabel?: string;
+	onActivate: () => void;
+}
+
+// ── Virtual delegate ────────────────────────────────────────────────────────
+
+class RemoteTreeVirtualDelegate implements IListVirtualDelegate<RemoteTreeElement> {
+	getHeight(_element: RemoteTreeElement): number {
+		return 22;
+	}
+	getTemplateId(element: RemoteTreeElement): string {
+		return element.kind === 'section' ? 'section' : 'leaf';
+	}
+}
+
+// ── Section renderer ────────────────────────────────────────────────────────
+
+interface ISectionTemplateData {
+	icon: HTMLElement;
+	label: HTMLElement;
+}
+
+class RemoteSectionRenderer implements ITreeRenderer<RemoteSectionItem, void, ISectionTemplateData> {
+	readonly templateId = 'section';
+
+	renderTemplate(container: HTMLElement): ISectionTemplateData {
+		container.classList.add('remote-tree-section');
+		const icon = dom.append(container, dom.$('.remote-tree-section-icon'));
+		const label = dom.append(container, dom.$('.remote-tree-section-label'));
+		return { icon, label };
+	}
+
+	renderElement(node: ITreeNode<RemoteSectionItem, void>, _index: number, templateData: ISectionTemplateData): void {
+		const el = node.element;
+		templateData.icon.className = 'remote-tree-section-icon ' + ThemeIcon.asClassName(el.icon);
+		templateData.label.textContent = el.label;
+	}
+
+	disposeTemplate(_templateData: ISectionTemplateData): void { }
+}
+
+// ── Leaf renderer ───────────────────────────────────────────────────────────
+
+interface ILeafTemplateData {
+	container: HTMLElement;
+	icon: HTMLElement;
+	label: HTMLElement;
+	description: HTMLElement;
+	actionIcon: HTMLElement;
+}
+
+class RemoteLeafRenderer implements ITreeRenderer<RemoteLeafItem, void, ILeafTemplateData> {
+	readonly templateId = 'leaf';
+
+	renderTemplate(container: HTMLElement): ILeafTemplateData {
+		container.classList.add('remote-tree-leaf');
+		const icon = dom.append(container, dom.$('.remote-tree-leaf-icon'));
+		const label = dom.append(container, dom.$('.remote-tree-leaf-label'));
+		const description = dom.append(container, dom.$('.remote-tree-leaf-description'));
+		const actionIcon = dom.append(container, dom.$('.remote-tree-leaf-action'));
+		return { container, icon, label, description, actionIcon };
+	}
+
+	renderElement(node: ITreeNode<RemoteLeafItem, void>, _index: number, templateData: ILeafTemplateData): void {
+		const el = node.element;
+		templateData.icon.className = 'remote-tree-leaf-icon ' + ThemeIcon.asClassName(el.icon);
+		templateData.label.textContent = el.label;
+		templateData.label.title = el.label;
+		templateData.description.textContent = el.description ?? '';
+		templateData.description.title = el.description ?? '';
+
+		if (el.active) {
+			templateData.container.classList.add('active');
+			templateData.actionIcon.className = 'remote-tree-leaf-action ' + ThemeIcon.asClassName(Codicon.check);
+		} else {
+			templateData.container.classList.remove('active');
+			templateData.actionIcon.className = 'remote-tree-leaf-action ' + ThemeIcon.asClassName(Codicon.plug);
+		}
+		templateData.actionIcon.title = el.actionLabel ?? localize('remote.connect', 'Connect');
+	}
+
+	disposeTemplate(_templateData: ILeafTemplateData): void { }
+}
+
+// ── Data source ─────────────────────────────────────────────────────────────
+
+class RemoteDataSource implements IAsyncDataSource<RemoteTreeElement[], RemoteTreeElement> {
+	hasChildren(element: RemoteTreeElement[] | RemoteTreeElement): boolean {
+		if (Array.isArray(element)) {
+			return true;
+		}
+		return element.kind === 'section' && element.children.length > 0;
+	}
+
+	getChildren(element: RemoteTreeElement[] | RemoteTreeElement): RemoteTreeElement[] {
+		if (Array.isArray(element)) {
+			return element;
+		}
+		if (element.kind === 'section') {
+			return element.children;
+		}
+		return [];
+	}
+}
+
+// ── Accessibility ───────────────────────────────────────────────────────────
+
+class RemoteAccessibilityProvider implements IListAccessibilityProvider<RemoteTreeElement> {
+	getAriaLabel(element: RemoteTreeElement): string {
+		return element.label;
+	}
+	getWidgetAriaLabel(): string {
+		return localize('remoteExplorer', 'Remote Explorer');
+	}
+}
+
+// ── View pane ───────────────────────────────────────────────────────────────
 
 export class RemoteExplorerViewPane extends ViewPane {
 	static readonly ID = 'workbench.view.remoteExplorer';
 	static readonly NAME = localize2('remoteExplorer', 'Remote Explorer');
 
-	private container: HTMLElement | undefined;
-	private listContainer: HTMLElement | undefined;
+	private tree: WorkbenchAsyncDataTree<RemoteTreeElement[], RemoteTreeElement, void> | undefined;
+	private treeContainer: HTMLElement | undefined;
 
 	constructor(
-		options: IViewletViewOptions,
+		options: IViewPaneOptions,
 		@IKeybindingService keybindingService: IKeybindingService,
 		@IContextMenuService contextMenuService: IContextMenuService,
 		@IConfigurationService configurationService: IConfigurationService,
@@ -56,24 +197,41 @@ export class RemoteExplorerViewPane extends ViewPane {
 	protected override renderBody(container: HTMLElement): void {
 		super.renderBody(container);
 		container.classList.add('remote-explorer-view');
-		this.container = container;
-		this.listContainer = append(container, $('.remote-explorer-list'));
+
+		this.treeContainer = dom.append(container, dom.$('.remote-explorer-tree-container'));
+
+		this.tree = this.instantiationService.createInstance(
+			WorkbenchAsyncDataTree<RemoteTreeElement[], RemoteTreeElement, void>,
+			'RemoteExplorer',
+			this.treeContainer,
+			new RemoteTreeVirtualDelegate(),
+			[new RemoteSectionRenderer(), new RemoteLeafRenderer()],
+			new RemoteDataSource(),
+			{
+				accessibilityProvider: new RemoteAccessibilityProvider(),
+				collapseByDefault: () => false,
+			}
+		);
+
+		this._register(this.tree);
+
+		this._register(this.tree.onDidOpen(e => {
+			if (e.element && e.element.kind === 'leaf') {
+				e.element.onActivate();
+			}
+		}));
+
 		this.refresh();
 	}
 
 	protected override layoutBody(height: number, width: number): void {
 		super.layoutBody(height, width);
+		this.tree?.layout(height, width);
 	}
 
 	async refresh(): Promise<void> {
-		if (!this.listContainer) { return; }
-		clearNode(this.listContainer);
-		append(this.listContainer, $('div.remote-loading', undefined, localize('remote.loading', 'Loading…')));
+		if (!this.tree) { return; }
 
-		// Pull the stored GitHub token through an in-memory cache so we
-		// only hit the OS keychain once per session. Each keychain access
-		// triggers a macOS authorization prompt for unsigned dev builds,
-		// so we want to minimize them.
 		const githubToken = await getCachedGitHubToken();
 
 		const [sshHosts, wslDistros, containers, activeConns, codespaces] = await Promise.allSettled([
@@ -84,214 +242,238 @@ export class RemoteExplorerViewPane extends ViewPane {
 			githubToken ? this.remoteService.listCodespaces(githubToken) : Promise.resolve([]),
 		]);
 
-		clearNode(this.listContainer);
 		const active = activeConns.status === 'fulfilled' ? activeConns.value : [];
 
-		// --- Tunnels section ---
-		const tunnelSection = this.renderSection(this.listContainer, localize('remote.tunnels', 'Tunnels'), Codicon.remote);
-		const activeTunnels = active.filter(c => c.kind === 'tunnel');
-		if (activeTunnels.length > 0) {
-			for (const t of activeTunnels) {
-				this.renderRemoteRow(
-					tunnelSection,
-					t.label,
-					Codicon.remote,
-					true,
-					() => { /* already connected — no-op */ },
-				);
-			}
-		}
-		// Always show sign-in buttons so users can add more auth providers
-		this.renderSignInButton(
-			tunnelSection,
-			localize('remote.signInMicrosoft', 'Sign in to tunnels registered with Microsoft'),
-			'microsoft',
-			() => this.commandService.executeCommand('sidex.remote.signInTunnel', 'microsoft'),
-		);
-		if (!githubToken) {
-			this.renderSignInButton(
-				tunnelSection,
-				localize('remote.signInGitHub', 'Sign in to tunnels registered with GitHub'),
-				'github',
-				() => this.commandService.executeCommand('sidex.remote.signInTunnel', 'github'),
-			);
-		}
+		const sections: RemoteSectionItem[] = [];
 
-		// --- SSH section ---
+		// --- Tunnels ---
+		sections.push(this.buildTunnelSection(active, githubToken));
+
+		// --- SSH ---
 		const hosts = sshHosts.status === 'fulfilled' ? sshHosts.value : [];
-		const sshSection = this.renderSection(this.listContainer, localize('remote.ssh', 'SSH'), Codicon.remoteExplorer);
-		if (hosts.length === 0) {
-			this.renderEmptyMessage(sshSection, localize('remote.ssh.noHosts', 'No SSH targets found in ~/.ssh/config'));
-		} else {
-			for (const host of hosts) {
-				this.renderSshHost(sshSection, host, active);
-			}
-		}
+		sections.push(this.buildSshSection(hosts, active));
 
-		// --- Codespaces section ---
+		// --- GitHub Codespaces ---
 		const spaces = codespaces.status === 'fulfilled' ? codespaces.value : [];
-		const codespaceSection = this.renderSection(this.listContainer, localize('remote.codespaces', 'GitHub Codespaces'), Codicon.github);
-		if (!githubToken) {
-			this.renderSignInButton(
-				codespaceSection,
-				localize('remote.codespaces.signIn', 'Sign in with GitHub to see your Codespaces'),
-				'github',
-				() => this.commandService.executeCommand('sidex.remote.signInTunnel', 'github'),
-			);
-		} else if (spaces.length === 0) {
-			this.renderEmptyMessage(codespaceSection, localize('remote.codespaces.empty', 'No Codespaces found'));
-		} else {
-			for (const space of spaces) {
-				this.renderCodespace(codespaceSection, space, githubToken);
-			}
-		}
+		sections.push(this.buildCodespacesSection(spaces, githubToken));
 
-		// --- WSL section (Windows only — other platforms return []) ---
+		// --- WSL (only if distros exist) ---
 		const distros = wslDistros.status === 'fulfilled' ? wslDistros.value : [];
 		if (distros.length > 0) {
-			const wslSection = this.renderSection(this.listContainer, localize('remote.wsl', 'WSL Targets'), Codicon.vm);
-			for (const distro of distros) {
-				this.renderWslDistro(wslSection, distro);
+			sections.push(this.buildWslSection(distros));
+		}
+
+		// --- Dev Containers ---
+		const ctrs = containers.status === 'fulfilled' ? containers.value : [];
+		sections.push(this.buildContainerSection(ctrs));
+
+		await this.tree.setInput(sections);
+		this.tree.expandAll();
+	}
+
+	// ── Section builders ──────────────────────────────────────────────────
+
+	private buildTunnelSection(
+		active: { label: string; kind: string }[],
+		githubToken: string | null,
+	): RemoteSectionItem {
+		const children: RemoteLeafItem[] = [];
+
+		for (const t of active.filter(c => c.kind === 'tunnel')) {
+			children.push({
+				kind: 'leaf',
+				id: `tunnel-active-${t.label}`,
+				label: t.label,
+				icon: Codicon.remote,
+				active: true,
+				onActivate: () => { },
+			});
+		}
+
+		children.push({
+			kind: 'leaf',
+			id: 'tunnel-signin-microsoft',
+			label: localize('remote.signInMicrosoft', 'Sign in with Microsoft'),
+			icon: Codicon.account,
+			active: false,
+			description: localize('remote.tunnelsProvider', 'Remote-Tunnels'),
+			actionLabel: localize('remote.signIn', 'Sign In'),
+			onActivate: () => this.commandService.executeCommand('sidex.remote.signInTunnel', 'microsoft'),
+		});
+
+		if (!githubToken) {
+			children.push({
+				kind: 'leaf',
+				id: 'tunnel-signin-github',
+				label: localize('remote.signInGitHub', 'Sign in with GitHub'),
+				icon: Codicon.github,
+				active: false,
+				description: localize('remote.tunnelsProvider', 'Remote-Tunnels'),
+				actionLabel: localize('remote.signIn', 'Sign In'),
+				onActivate: () => this.commandService.executeCommand('sidex.remote.signInTunnel', 'github'),
+			});
+		}
+
+		return {
+			kind: 'section',
+			id: 'section-tunnels',
+			label: localize('remote.tunnels', 'Tunnels'),
+			icon: Codicon.remote,
+			children,
+		};
+	}
+
+	private buildSshSection(
+		hosts: SshHost[],
+		active: { label: string; kind: string }[],
+	): RemoteSectionItem {
+		const children: RemoteLeafItem[] = [];
+
+		if (hosts.length === 0) {
+			children.push({
+				kind: 'leaf',
+				id: 'ssh-empty',
+				label: localize('remote.ssh.noHosts', 'No SSH targets found in ~/.ssh/config'),
+				icon: Codicon.info,
+				active: false,
+				onActivate: () => { },
+			});
+		} else {
+			for (const host of hosts) {
+				const label = `${host.user ? `${host.user}@` : ''}${host.host}${host.port ? `:${host.port}` : ''}`;
+				const isConnected = active.some(c => c.kind === 'ssh' && c.label.includes(host.host));
+				children.push({
+					kind: 'leaf',
+					id: `ssh-${host.host}`,
+					label,
+					description: host.hostname ?? undefined,
+					icon: Codicon.vm,
+					active: isConnected,
+					onActivate: () => this.commandService.executeCommand('sidex.remote.connect', 'ssh' as RemoteKind, host),
+				});
 			}
 		}
 
-		// --- Dev Containers section ---
-		const ctrs = containers.status === 'fulfilled' ? containers.value : [];
-		const containerSection = this.renderSection(this.listContainer, localize('remote.containers', 'Dev Containers'), Codicon.package);
+		return {
+			kind: 'section',
+			id: 'section-ssh',
+			label: localize('remote.ssh', 'SSH'),
+			icon: Codicon.remoteExplorer,
+			children,
+		};
+	}
+
+	private buildCodespacesSection(
+		spaces: CodespaceEntry[],
+		githubToken: string | null,
+	): RemoteSectionItem {
+		const children: RemoteLeafItem[] = [];
+
+		if (!githubToken) {
+			children.push({
+				kind: 'leaf',
+				id: 'codespace-signin',
+				label: localize('remote.codespaces.signIn', 'Sign in with GitHub to see your Codespaces'),
+				icon: Codicon.github,
+				active: false,
+				actionLabel: localize('remote.signIn', 'Sign In'),
+				onActivate: () => this.commandService.executeCommand('sidex.remote.signInTunnel', 'github'),
+			});
+		} else if (spaces.length === 0) {
+			children.push({
+				kind: 'leaf',
+				id: 'codespace-empty',
+				label: localize('remote.codespaces.empty', 'No Codespaces found'),
+				icon: Codicon.info,
+				active: false,
+				onActivate: () => { },
+			});
+		} else {
+			for (const space of spaces) {
+				const isRunning = /available|running/i.test(space.state);
+				children.push({
+					kind: 'leaf',
+					id: `codespace-${space.name}`,
+					label: space.displayName,
+					description: `${space.repository} • ${space.branch}`,
+					icon: Codicon.github,
+					active: isRunning,
+					onActivate: async () => {
+						try {
+							await this.remoteService.connectCodespace(space.name, githubToken);
+						} catch (err) {
+							this.commandService.executeCommand('sidex.notify.error', String(err));
+						}
+					},
+				});
+			}
+		}
+
+		return {
+			kind: 'section',
+			id: 'section-codespaces',
+			label: localize('remote.codespaces', 'GitHub Codespaces'),
+			icon: Codicon.github,
+			children,
+		};
+	}
+
+	private buildWslSection(distros: WslDistro[]): RemoteSectionItem {
+		const children: RemoteLeafItem[] = distros.map(distro => ({
+			kind: 'leaf' as const,
+			id: `wsl-${distro.name}`,
+			label: `${distro.name}${distro.isDefault ? ' (Default)' : ''}`,
+			description: `WSL${distro.version} • ${distro.state}`,
+			icon: Codicon.terminalLinux,
+			active: false,
+			onActivate: () => this.commandService.executeCommand('sidex.remote.connect', 'wsl' as RemoteKind, distro),
+		}));
+
+		return {
+			kind: 'section',
+			id: 'section-wsl',
+			label: localize('remote.wsl', 'WSL Targets'),
+			icon: Codicon.vm,
+			children,
+		};
+	}
+
+	private buildContainerSection(ctrs: ContainerEntry[]): RemoteSectionItem {
+		const children: RemoteLeafItem[] = [];
+
 		if (ctrs.length === 0) {
-			this.renderEmptyMessage(containerSection, localize('remote.containers.noContainers', 'No running containers found'));
+			children.push({
+				kind: 'leaf',
+				id: 'container-empty',
+				label: localize('remote.containers.noContainers', 'No running containers found'),
+				icon: Codicon.info,
+				active: false,
+				onActivate: () => { },
+			});
 		} else {
 			for (const ctr of ctrs) {
-				this.renderContainer(containerSection, ctr);
+				const isRunning = /up|running/i.test(ctr.status);
+				children.push({
+					kind: 'leaf',
+					id: `container-${ctr.id}`,
+					label: ctr.name.replace(/^\//, ''),
+					description: ctr.image,
+					icon: Codicon.package,
+					active: isRunning,
+					onActivate: () => isRunning
+						? this.commandService.executeCommand('sidex.remote.connect', 'container' as RemoteKind, ctr)
+						: undefined,
+				});
 			}
 		}
-	}
 
-	// ── Section helpers ────────────────────────────────────────────────────────
-
-	private renderSection(parent: HTMLElement, label: string, icon: ThemeIcon): HTMLElement {
-		const section = append(parent, $('.remote-section'));
-		const header = append(section, $('.remote-section-header'));
-		header.classList.add('expanded');
-
-		const toggle = append(header, $(ThemeIcon.asCSSSelector(Codicon.chevronDown)));
-		toggle.classList.add('remote-section-toggle');
-		append(header, $(ThemeIcon.asCSSSelector(icon)));
-		append(header, $('span.remote-section-label', undefined, label));
-
-		const body = append(section, $('.remote-section-body'));
-
-		this._register(addDisposableListener(header, EventType.CLICK, () => {
-			const expanded = header.classList.toggle('expanded');
-			body.style.display = expanded ? '' : 'none';
-			toggle.className = expanded
-				? ThemeIcon.asCSSSelector(Codicon.chevronDown).slice(1)
-				: ThemeIcon.asCSSSelector(Codicon.chevronRight).slice(1);
-			toggle.classList.add('remote-section-toggle');
-		}));
-
-		return body;
-	}
-
-	private renderSignInButton(parent: HTMLElement, label: string, provider: string, action: () => void): void {
-		const row = append(parent, $('.remote-sign-in-row'));
-		const providerIcon = provider === 'github'
-			? Codicon.github
-			: Codicon.account;
-		append(row, $(ThemeIcon.asCSSSelector(providerIcon)));
-		const btn = append(row, $('span.remote-sign-in-label', undefined, label));
-		btn.setAttribute('role', 'button');
-		btn.tabIndex = 0;
-		this._register(addDisposableListener(row, EventType.CLICK, action));
-		this._register(addDisposableListener(btn, 'keydown', (e: KeyboardEvent) => {
-			if (e.key === 'Enter' || e.key === ' ') { action(); }
-		}));
-	}
-
-	private renderEmptyMessage(parent: HTMLElement, message: string): void {
-		append(parent, $('div.remote-empty-message', undefined, message));
-	}
-
-	private renderSshHost(parent: HTMLElement, host: SshHost, activeConns: { label: string; kind: string }[]): void {
-		const isConnected = activeConns.some(c => c.kind === 'ssh' && c.label.includes(host.host));
-		const row = this.renderRemoteRow(
-			parent,
-			`${host.user ? `${host.user}@` : ''}${host.host}${host.port ? `:${host.port}` : ''}`,
-			Codicon.vm,
-			isConnected,
-			() => this.commandService.executeCommand('sidex.remote.connect', 'ssh' as RemoteKind, host),
-		);
-		if (isConnected) {
-			row.classList.add('connected');
-		}
-	}
-
-	private renderWslDistro(parent: HTMLElement, distro: WslDistro): void {
-		this.renderRemoteRow(
-			parent,
-			`${distro.name}${distro.isDefault ? ' (Default)' : ''}`,
-			Codicon.terminalLinux,
-			false,
-			() => this.commandService.executeCommand('sidex.remote.connect', 'wsl' as RemoteKind, distro),
-		);
-	}
-
-	private renderContainer(parent: HTMLElement, ctr: ContainerEntry): void {
-		const isRunning = ctr.status.toLowerCase().includes('up') || ctr.status.toLowerCase().includes('running');
-		this.renderRemoteRow(
-			parent,
-			ctr.name.replace(/^\//, ''),
-			Codicon.package,
-			isRunning,
-			() => isRunning
-				? this.commandService.executeCommand('sidex.remote.connect', 'container' as RemoteKind, ctr)
-				: undefined,
-		);
-	}
-
-	private renderCodespace(parent: HTMLElement, space: CodespaceEntry, token: string): void {
-		const isRunning = space.state.toLowerCase().includes('available') || space.state.toLowerCase().includes('running');
-		this.renderRemoteRow(
-			parent,
-			space.displayName,
-			Codicon.github,
-			isRunning,
-			async () => {
-				try {
-					await this.remoteService.connectCodespace(space.name, token);
-				} catch (err) {
-					this.commandService.executeCommand('sidex.notify.error', String(err));
-				}
-			},
-		);
-	}
-
-	private renderRemoteRow(
-		parent: HTMLElement,
-		label: string,
-		icon: ThemeIcon,
-		active: boolean,
-		onConnect: () => void,
-	): HTMLElement {
-		const row = append(parent, $('.remote-row'));
-		if (active) { row.classList.add('active'); }
-
-		append(row, $(ThemeIcon.asCSSSelector(icon)));
-		const labelEl = append(row, $('span.remote-row-label', undefined, label));
-		labelEl.title = label;
-
-		const actions = append(row, $('.remote-row-actions'));
-		const connectBtn = append(actions, $('a.remote-action-connect'));
-		connectBtn.title = localize('remote.connect', 'Connect');
-		append(connectBtn, $(ThemeIcon.asCSSSelector(active ? Codicon.check : Codicon.plug)));
-
-		this._register(addDisposableListener(row, EventType.DBLCLICK, onConnect));
-		this._register(addDisposableListener(connectBtn, EventType.CLICK, (e) => {
-			e.stopPropagation();
-			onConnect();
-		}));
-
-		return row;
+		return {
+			kind: 'section',
+			id: 'section-containers',
+			label: localize('remote.containers', 'Dev Containers'),
+			icon: Codicon.package,
+			children,
+		};
 	}
 }
 

@@ -1164,10 +1164,6 @@ class TauriExtensionHostContribution extends Disposable implements IWorkbenchCon
 		this._syncExtensionState();
 
 		setTimeout(() => {
-			this._syncExtensionState();
-		}, 3000);
-
-		setTimeout(() => {
 			if (!this._capabilitiesQueried) {
 				this._queryAndRegisterProviders();
 			}

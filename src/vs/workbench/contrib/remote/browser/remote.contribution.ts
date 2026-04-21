@@ -17,8 +17,8 @@ import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContaine
 import { RemoteExplorerViewPane, getCachedGitHubToken, clearCachedGitHubToken } from './remoteExplorer.js';
 import { registerAction2, Action2, MenuId } from '../../../../platform/actions/common/actions.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
-import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import {
 	IStatusbarService,
 	StatusbarAlignment,
@@ -32,10 +32,6 @@ import {
 } from '../../../common/contributions.js';
 import { LifecyclePhase } from '../../../services/lifecycle/common/lifecycle.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import {
-	STATUS_BAR_REMOTE_ITEM_BACKGROUND,
-	STATUS_BAR_REMOTE_ITEM_FOREGROUND,
-} from '../../../common/theme.js';
 import {
 	ISideXRemoteService,
 	SshHost,
@@ -55,7 +51,7 @@ import { INotificationService, Severity } from '../../../../platform/notificatio
 
 const remoteExplorerViewIcon = registerIcon(
 	'remote-explorer-view-icon',
-	Codicon.remote,
+	Codicon.remoteExplorer,
 	localize('remoteExplorerViewIcon', 'View icon of the Remote Explorer view.'),
 );
 
@@ -79,6 +75,30 @@ const remoteViewContainer = viewContainerRegistry.registerViewContainer(
 		icon: remoteExplorerViewIcon,
 		order: 4,
 		hideIfEmpty: false,
+		viewOrderDelegate: {
+			getOrder: (group?: string) => {
+				if (!group) {
+					return;
+				}
+
+				let matches = /^targets@(\d+)$/.exec(group);
+				if (matches) {
+					return -1000;
+				}
+
+				matches = /^details(@(\d+))?$/.exec(group);
+				if (matches) {
+					return -500 + Number(matches[2]);
+				}
+
+				matches = /^help(@(\d+))?$/.exec(group);
+				if (matches) {
+					return -10;
+				}
+
+				return;
+			}
+		},
 	},
 	ViewContainerLocation.Sidebar,
 );
@@ -97,13 +117,12 @@ viewsRegistry.registerViews(
 			order: 0,
 			canToggleVisibility: false,
 			canMoveView: false,
-			focusCommand: {
-				id: 'workbench.remote.focus',
-				keybindings: {
-					primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.F5,
-					weight: KeybindingWeight.WorkbenchContrib,
-				},
+		focusCommand: {
+			id: 'workbench.remote.focus',
+			keybindings: {
+				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.F5,
 			},
+		},
 		},
 	],
 	remoteViewContainer,
@@ -118,7 +137,12 @@ registerAction2(
 				id: 'sidex.remote.refresh',
 				title: localize2('sidex.remote.refresh', 'Refresh Remote Explorer'),
 				icon: Codicon.refresh,
-				menu: [{ id: MenuId.ViewTitle, group: 'navigation', order: 1 }],
+				menu: [{
+					id: MenuId.ViewTitle,
+					group: 'navigation',
+					order: 1,
+					when: ContextKeyExpr.equals('view', RemoteExplorerViewPane.ID),
+				}],
 			});
 		}
 		async run(accessor: ServicesAccessor): Promise<void> {
@@ -607,12 +631,11 @@ class RemoteStatusBarIndicator extends Disposable implements IWorkbenchContribut
 			: localize('remote.statusbar.aria', 'Open a remote window');
 		return {
 			name: localize('remote.statusbar.name', 'Open a Remote Window'),
+			kind: label ? 'remote' : undefined,
 			text,
 			ariaLabel,
 			tooltip: localize('remote.statusbar.tooltip', 'Open a Remote Window'),
 			command: 'sidex.remote.openWindow',
-			backgroundColor: { id: STATUS_BAR_REMOTE_ITEM_BACKGROUND },
-			color: { id: STATUS_BAR_REMOTE_ITEM_FOREGROUND },
 		};
 	}
 

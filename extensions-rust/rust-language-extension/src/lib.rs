@@ -262,7 +262,7 @@ fn lsp_request(
         })
         .unwrap_or_default();
     let payload = format!(
-        r#"{{"server":"rust-analyzer","cmd":"rust-analyzer","method":"{method}","params":{{"textDocument":{{"uri":"{uri}"}}{pos_json}{extra_params}}}}}"#
+        r#"{{"server":"rust-analyzer","cmd":"rust-analyzer","downloadUrl":"https://github.com/rust-lang/rust-analyzer/releases/latest/download/rust-analyzer-{{target}}.gz","method":"{method}","params":{{"textDocument":{{"uri":"{uri}"}}{pos_json}{extra_params}}}}}"#
     );
     host::execute_command("__sidex.lsp", &payload).ok()
 }

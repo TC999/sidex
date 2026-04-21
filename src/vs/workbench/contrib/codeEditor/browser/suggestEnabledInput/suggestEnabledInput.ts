@@ -155,6 +155,10 @@ export class SuggestEnabledInput extends Widget {
 		};
 	}
 
+	onHide(): void {
+		// no-op — SideX uses a plain <input>, not a CodeEditorWidget
+	}
+
 	get onFocus(): Event<void> {
 		return this._onDidFocus.event;
 	}

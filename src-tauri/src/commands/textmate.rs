@@ -292,6 +292,71 @@ pub fn textmate_tokenize_line_binary(
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenizeDocumentResponse {
+    pub lines: Vec<TokenizeLineBinaryResponse>,
+    pub final_stack: u64,
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::needless_pass_by_value)]
+pub fn textmate_tokenize_document(
+    store: tauri::State<'_, Arc<TextMateStore>>,
+    scope_name: String,
+    lines: Vec<String>,
+    start_stack: Option<u64>,
+    time_limit_ms: Option<u64>,
+) -> Result<TokenizeDocumentResponse, String> {
+    let grammar = store
+        .grammars
+        .read()
+        .expect("textmate grammars poisoned")
+        .get(&scope_name)
+        .cloned()
+        .ok_or_else(|| format!("grammar not loaded: {scope_name}"))?;
+
+    let mut current_stack = start_stack.and_then(|id| {
+        store
+            .stacks
+            .read()
+            .expect("textmate stacks poisoned")
+            .get(&id)
+            .cloned()
+    });
+
+    let mut results = Vec::with_capacity(lines.len());
+
+    for line_text in &lines {
+        let TokenizeLineBinaryResult {
+            tokens,
+            rule_stack,
+            stopped_early,
+            ..
+        } = grammar.tokenize_line_binary(line_text, current_stack.clone(), time_limit_ms);
+
+        let handle = store.fresh_stack_handle();
+        store
+            .stacks
+            .write()
+            .expect("textmate stacks poisoned")
+            .insert(handle, Arc::clone(&rule_stack));
+
+        current_stack = Some(rule_stack);
+        results.push(TokenizeLineBinaryResponse {
+            tokens,
+            rule_stack: handle,
+            stopped_early,
+        });
+    }
+
+    let final_stack = results.last().map(|r| r.rule_stack).unwrap_or(0);
+    Ok(TokenizeDocumentResponse {
+        lines: results,
+        final_stack,
+    })
+}
+
 /// Releases a rule-stack handle. Callers should invoke this when the
 /// document backing a tokenization session closes so the store's
 /// handle map doesn't grow unbounded.

@@ -211,7 +211,7 @@ impl LspServerProcess {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
 
         let mut child = command
             .spawn()
@@ -325,6 +325,16 @@ impl LspServerProcess {
 
 impl Drop for LspServerProcess {
     fn drop(&mut self) {
+        if let Some(mut stderr) = self.child.stderr.take() {
+            let mut buf = String::new();
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut buf);
+            if !buf.is_empty() {
+                for line in buf.lines().take(10) {
+                    log::warn!("[lsp:{}] stderr: {}", self.server_name, line);
+                }
+            }
+        }
         let _ = self.child.kill();
         log::info!("[lsp:{}] killed", self.server_name);
     }
@@ -356,6 +366,96 @@ fn find_binary(name: &str, extra_paths: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Determine the platform target triple for LSP binary downloads.
+fn platform_target() -> Option<&'static str> {
+    if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        Some("aarch64-apple-darwin")
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        Some("x86_64-apple-darwin")
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+        Some("x86_64-pc-windows-msvc")
+    } else {
+        None
+    }
+}
+
+/// Download and cache an LSP binary from a URL template.
+///
+/// `url_template` may contain `{target}` which is replaced with the platform
+/// triple. The URL must point to a gzip-compressed binary. Returns the path
+/// to the cached binary, or `None` on failure.
+fn download_lsp_binary(server_name: &str, url_template: &str) -> Option<String> {
+    let target = platform_target()?;
+    let url = url_template.replace("{target}", target);
+
+    let data_dir = dirs::data_local_dir()?;
+    let server_dir = data_dir.join("com.sidex.app").join("lsp-servers").join(server_name);
+    let bin_name = if cfg!(target_os = "windows") {
+        format!("{server_name}.exe")
+    } else {
+        server_name.to_string()
+    };
+    let bin_path = server_dir.join(&bin_name);
+
+    if bin_path.exists() {
+        return Some(bin_path.to_string_lossy().to_string());
+    }
+
+    log::info!("[lsp:{server_name}] downloading from {url}");
+
+    let response = match reqwest::blocking::get(&url) {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            log::error!("[lsp:{server_name}] download failed: HTTP {}", r.status());
+            return None;
+        }
+        Err(e) => {
+            log::error!("[lsp:{server_name}] download failed: {e}");
+            return None;
+        }
+    };
+
+    let compressed = match response.bytes() {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("[lsp:{server_name}] failed to read response: {e}");
+            return None;
+        }
+    };
+
+    log::info!("[lsp:{server_name}] downloaded {} bytes, decompressing", compressed.len());
+
+    let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+    let mut decompressed = Vec::new();
+    if let Err(e) = std::io::Read::read_to_end(&mut decoder, &mut decompressed) {
+        log::error!("[lsp:{server_name}] decompression failed: {e}");
+        return None;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(&server_dir) {
+        log::error!("[lsp:{server_name}] mkdir failed: {e}");
+        return None;
+    }
+    if let Err(e) = std::fs::write(&bin_path, &decompressed) {
+        log::error!("[lsp:{server_name}] write failed: {e}");
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)) {
+            log::error!("[lsp:{server_name}] chmod failed: {e}");
+            return None;
+        }
+    }
+
+    log::info!("[lsp:{server_name}] installed to {}", bin_path.display());
+    Some(bin_path.to_string_lossy().to_string())
 }
 
 #[allow(unsafe_code, clippy::all, unused)]
@@ -390,6 +490,7 @@ struct WasmHostState {
     tsserver_open_files: std::collections::HashSet<String>,
     lsp_servers: HashMap<String, LspServerProcess>,
     lsp_open_files: HashMap<String, std::collections::HashSet<String>>,
+    lsp_spawn_failures: HashMap<String, (u32, std::time::Instant)>,
     extension_id: String,
     extension_path: String,
     extension_version: String,
@@ -508,6 +609,7 @@ impl WasmHostState {
             tsserver_open_files: std::collections::HashSet::new(),
             lsp_servers: HashMap::new(),
             lsp_open_files: HashMap::new(),
+            lsp_spawn_failures: HashMap::new(),
             extension_id: String::new(),
             extension_path: String::new(),
             extension_version: String::new(),
@@ -1658,21 +1760,36 @@ impl WasmHostState {
         let params = extract_json_object(payload, "params").unwrap_or_else(|| "{}".to_string());
 
         if !self.lsp_servers.contains_key(&server_name) {
+            if let Some((failures, last)) = self.lsp_spawn_failures.get(&server_name) {
+                if *failures >= 3 && last.elapsed() < std::time::Duration::from_secs(30) {
+                    return Err(format!("lsp: {server_name} disabled after {failures} consecutive failures (retrying in {}s)", 30 - last.elapsed().as_secs()));
+                }
+                if last.elapsed() >= std::time::Duration::from_secs(30) {
+                    self.lsp_spawn_failures.remove(&server_name);
+                }
+            }
+
             let cmd = extract_json_string(payload, "cmd").unwrap_or_else(|| server_name.clone());
             let extra_args = extract_json_string_array(payload, "args");
+            let download_url = extract_json_string(payload, "downloadUrl");
             let root = self
                 .workspace_folders
                 .first()
                 .map_or_else(|| "file:///tmp".to_string(), |f| format!("file://{f}"));
-            let binary = find_binary(
-                &cmd,
-                &[
-                    &format!("/usr/local/bin/{cmd}"),
-                    &format!("/opt/homebrew/bin/{cmd}"),
-                    &format!("/usr/bin/{cmd}"),
-                ],
-            )
-            .ok_or_else(|| format!("lsp: {cmd} binary not found"))?;
+            let binary = download_url
+                .as_deref()
+                .and_then(|url| download_lsp_binary(&cmd, url))
+                .or_else(|| {
+                    find_binary(
+                        &cmd,
+                        &[
+                            &format!("/usr/local/bin/{cmd}"),
+                            &format!("/opt/homebrew/bin/{cmd}"),
+                            &format!("/usr/bin/{cmd}"),
+                        ],
+                    )
+                })
+                .ok_or_else(|| format!("lsp: {cmd} binary not found"))?;
 
             let cargo_dir = env!("CARGO_MANIFEST_DIR");
             let resolved_args: Vec<String> = extra_args
@@ -1691,12 +1808,21 @@ impl WasmHostState {
                 .iter()
                 .map(std::string::String::as_str)
                 .collect();
-            let server = LspServerProcess::spawn(&server_name, &binary, &args_refs, &root)
-                .ok_or_else(|| format!("lsp: failed to start {server_name}"))?;
-
-            self.lsp_servers.insert(server_name.clone(), server);
-            self.lsp_open_files
-                .insert(server_name.clone(), std::collections::HashSet::new());
+            match LspServerProcess::spawn(&server_name, &binary, &args_refs, &root) {
+                Some(server) => {
+                    self.lsp_spawn_failures.remove(&server_name);
+                    self.lsp_servers.insert(server_name.clone(), server);
+                    self.lsp_open_files
+                        .insert(server_name.clone(), std::collections::HashSet::new());
+                }
+                None => {
+                    let entry = self.lsp_spawn_failures.entry(server_name.clone())
+                        .or_insert((0, std::time::Instant::now()));
+                    entry.0 += 1;
+                    entry.1 = std::time::Instant::now();
+                    return Err(format!("lsp: failed to start {server_name} (attempt {})", entry.0));
+                }
+            }
         }
 
         if let Some(td) = extract_json_object(&params, "textDocument") {

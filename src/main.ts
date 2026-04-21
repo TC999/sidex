@@ -29,21 +29,12 @@ async function boot() {
 	// Load locale translations before any VS Code module imports
 	await loadNlsMessages();
 
-	const stages = [
-		['common', () => import('./vs/workbench/workbench.common.main.js')],
-		['web.main', () => import('./vs/workbench/browser/web.main.js')],
-		['web-dialog', () => import('./vs/workbench/browser/parts/dialogs/dialog.web.contribution.js')],
-		['web-services', () => import('./vs/workbench/workbench.web.main.js')]
-	] as const;
-
-	for (const [label, loader] of stages) {
-		try {
-			await loader();
-		} catch (e) {
-			console.error(`[SideX] Barrel stage "${label}" failed:`, e);
-			throw e;
-		}
-	}
+	await Promise.all([
+		import('./vs/workbench/workbench.common.main.js').catch(e => { console.error('[SideX] Barrel "common" failed:', e); throw e; }),
+		import('./vs/workbench/browser/web.main.js').catch(e => { console.error('[SideX] Barrel "web.main" failed:', e); throw e; }),
+		import('./vs/workbench/browser/parts/dialogs/dialog.web.contribution.js').catch(e => { console.error('[SideX] Barrel "web-dialog" failed:', e); throw e; }),
+		import('./vs/workbench/workbench.web.main.js').catch(e => { console.error('[SideX] Barrel "web-services" failed:', e); throw e; }),
+	]);
 
 	// SideX Rust bridge initialization — make services available before workbench creation
 	if ((globalThis as any).__SIDEX_TAURI__) {
@@ -132,7 +123,7 @@ async function boot() {
 			'workbench.startupEditor': 'welcomePage',
 			'workbench.enableExperiments': false,
 			'workbench.iconTheme': 'vs-seti',
-			'workbench.colorTheme': 'Default Dark Modern',
+			'workbench.colorTheme': 'Dark Modern',
 			'editor.experimentalGpuAcceleration': 'auto',
 			'workbench.productIconTheme': 'Default',
 			'workbench.editor.showTabs': 'multiple',
