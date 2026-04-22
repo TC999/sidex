@@ -758,8 +758,8 @@ export class SettingsEditor2 extends EditorPane {
 		if (!visible) {
 			// Wait for editor to be removed from DOM #106303
 			setTimeout(() => {
-				this.searchWidget.onHide();
-				this.settingRenderers.cancelSuggesters();
+				this.searchWidget?.onHide();
+				this.settingRenderers?.cancelSuggesters();
 			}, 0);
 		}
 	}
@@ -2109,6 +2109,9 @@ export class SettingsEditor2 extends EditorPane {
 	 * depending on the behavior.
 	 */
 	private toggleTocBySearchBehaviorType() {
+		if (!this.splitView) {
+			return;
+		}
 		const tocBehavior = this.configurationService.getValue<'filter' | 'hide'>(SEARCH_TOC_BEHAVIOR_KEY);
 		const hideToc = tocBehavior === 'hide';
 		if (hideToc) {
@@ -2470,7 +2473,7 @@ export class SettingsEditor2 extends EditorPane {
 			}
 
 			this.rootElement.classList.remove('no-results');
-			this.splitView.el.style.visibility = 'visible';
+			this.splitView?.el.style.setProperty('visibility', 'visible');
 			return;
 		} else {
 			const count = this.searchResultModel.getUniqueResultsCount();
@@ -2514,7 +2517,9 @@ export class SettingsEditor2 extends EditorPane {
 			}
 			this.layout(this.dimension);
 			this.rootElement.classList.toggle('no-results', count === 0);
-			this.splitView.el.style.visibility = count === 0 ? 'hidden' : 'visible';
+			if (this.splitView) {
+				this.splitView.el.style.visibility = count === 0 ? 'hidden' : 'visible';
+			}
 		}
 	}
 
@@ -2535,7 +2540,7 @@ export class SettingsEditor2 extends EditorPane {
 	}
 
 	private layoutSplitView(dimension: DOM.Dimension): void {
-		if (!this.isVisible()) {
+		if (!this.isVisible() || !this.splitView) {
 			return;
 		}
 		const listHeight = dimension.height - (72 + 11 + 14); /* header height + editor padding */

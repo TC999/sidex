@@ -49,7 +49,6 @@ import './mainThreadQuickDiff.js';
 import './mainThreadQuickOpen.js';
 import './mainThreadRemoteConnectionData.js';
 import './mainThreadSaveParticipant.js';
-import './mainThreadSpeech.js';
 import './mainThreadEditSessionIdentityParticipant.js';
 import './mainThreadSCM.js';
 import './mainThreadSearch.js';
@@ -68,12 +67,7 @@ import './mainThreadPower.js';
 import './mainThreadWebviewManager.js';
 import './mainThreadWorkspace.js';
 import './mainThreadComments.js';
-import './mainThreadNotebook.js';
-import './mainThreadNotebookKernels.js';
-import './mainThreadNotebookDocumentsAndEditors.js';
-import './mainThreadNotebookRenderers.js';
-import './mainThreadNotebookSaveParticipant.js';
-import './mainThreadInteractive.js';
+// Notebook/Interactive — removed: SideX uses sidex-extension-api
 import './mainThreadTask.js';
 import './mainThreadLabelService.js';
 import './mainThreadTunnelService.js';
@@ -81,8 +75,8 @@ import './mainThreadAuthentication.js';
 import './mainThreadTimeline.js';
 import './mainThreadTesting.js';
 import './mainThreadSecretState.js';
-import './mainThreadShare.js';
-import './mainThreadProfileContentHandlers.js';
+// Share — removed: SideX uses sidex-extension-api
+// ProfileContentHandlers — removed: SideX uses sidex-extension-api
 import './mainThreadDataChannels.js';
 import './mainThreadMeteredConnection.js';
 import './mainThreadBrowsers.js';

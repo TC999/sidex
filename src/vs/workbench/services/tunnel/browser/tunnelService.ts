@@ -4,9 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
-import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
-import { ILogService } from '../../../../platform/log/common/log.js';
 import { IAddressProvider } from '../../../../platform/remote/common/remoteAgentConnection.js';
 import {
 	AbstractTunnelService,
@@ -19,11 +17,9 @@ import { IWorkbenchEnvironmentService } from '../../environment/common/environme
 
 export class TunnelService extends AbstractTunnelService {
 	constructor(
-		@ILogService logService: ILogService,
-		@IWorkbenchEnvironmentService private environmentService: IWorkbenchEnvironmentService,
-		@IConfigurationService configurationService: IConfigurationService
+		@IWorkbenchEnvironmentService private environmentService: IWorkbenchEnvironmentService
 	) {
-		super(logService, configurationService);
+		super();
 	}
 
 	public isPortPrivileged(_port: number): boolean {
@@ -47,15 +43,7 @@ export class TunnelService extends AbstractTunnelService {
 		}
 
 		if (isTunnelProvider(tunnelProvider)) {
-			return this.createWithProvider(
-				tunnelProvider,
-				remoteHost,
-				remotePort,
-				localPort,
-				elevateIfNeeded,
-				privacy,
-				protocol
-			);
+			return this.createWithProvider(tunnelProvider, remoteHost, remotePort, localPort, elevateIfNeeded, privacy, protocol);
 		}
 		return undefined;
 	}

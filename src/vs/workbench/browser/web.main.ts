@@ -55,7 +55,6 @@ import {
 import { InMemoryFileSystemProvider } from '../../platform/files/common/inMemoryFilesystemProvider.js';
 import { ICommandService } from '../../platform/commands/common/commands.js';
 import { IEditorService } from '../services/editor/common/editorService.js';
-import { IndexedDBFileSystemProvider } from '../../platform/files/browser/indexedDBFileSystemProvider.js';
 import { BrowserRequestService } from '../services/request/browser/requestService.js';
 import { IRequestService } from '../../platform/request/common/request.js';
 import {
@@ -87,12 +86,10 @@ import {
 	IWorkspaceTrustEnablementService,
 	IWorkspaceTrustManagementService
 } from '../../platform/workspace/common/workspaceTrust.js';
-import { HTMLFileSystemProvider } from '../../platform/files/browser/htmlFileSystemProvider.js';
 import { TauriFileSystemProvider } from '../../platform/files/browser/tauriFileSystemProvider.js';
+import { TauriUserDataProvider } from '../../platform/files/browser/tauriUserDataProvider.js';
 import { IOpenerService } from '../../platform/opener/common/opener.js';
 import { mixin, safeStringify } from '../../base/common/objects.js';
-import { IndexedDB } from '../../base/browser/indexedDB.js';
-import { WebFileSystemAccess } from '../../platform/files/browser/webFileSystemAccess.js';
 import { IProgressService } from '../../platform/progress/common/progress.js';
 import { DelayedLogChannel } from '../services/output/common/delayedLogChannel.js';
 import { dirname, joinPath } from '../../base/common/resources.js';
@@ -136,7 +133,6 @@ export interface IBrowserMainWorkbench {
 
 export class BrowserMain extends Disposable {
 	private readonly onWillShutdownDisposables = this._register(new DisposableStore());
-	private readonly indexedDBFileSystemProviders: IndexedDBFileSystemProvider[] = [];
 
 	constructor(
 		private readonly domElement: HTMLElement,
@@ -608,63 +604,41 @@ export class BrowserMain extends Disposable {
 		loggerService: ILoggerService,
 		logsPath: URI
 	): Promise<void> {
-		// IndexedDB is used for logging and user data
-		let indexedDB: IndexedDB | undefined;
-		const userDataStore = 'vscode-userdata-store';
-		const logsStore = 'vscode-logs-store';
-		const handlesStore = 'vscode-filehandles-store';
-		try {
-			indexedDB = await IndexedDB.create('vscode-web-db', 3, [userDataStore, logsStore, handlesStore]);
+		// SideX: All persistent file I/O is routed through the Tauri backend
+		// (Rust `sidex-workspace` + `sidex-text`). The `vscode-userdata:`
+		// scheme is persisted to the OS app-data directory so settings,
+		// extensions, themes, and keybindings survive refreshes.
 
-			// Close onWillShutdown
-			this.onWillShutdownDisposables.add(toDisposable(() => indexedDB?.close()));
-		} catch (error) {
-			logService.error('Error while creating IndexedDB', error);
-		}
-
-		// Logger
-		if (indexedDB) {
-			const logFileSystemProvider = new IndexedDBFileSystemProvider(logsPath.scheme, indexedDB, logsStore, false);
-			this.indexedDBFileSystemProviders.push(logFileSystemProvider);
-			fileService.registerProvider(logsPath.scheme, logFileSystemProvider);
-		} else {
-			fileService.registerProvider(logsPath.scheme, new InMemoryFileSystemProvider());
-		}
-
-		// User data
-		let userDataProvider;
-		if (indexedDB) {
-			userDataProvider = new IndexedDBFileSystemProvider(Schemas.vscodeUserData, indexedDB, userDataStore, true);
-			this.indexedDBFileSystemProviders.push(userDataProvider);
-			this.registerDeveloperActions(userDataProvider);
-		} else {
-			logService.info('Using in-memory user data provider');
-			userDataProvider = new InMemoryFileSystemProvider();
-		}
-		fileService.registerProvider(Schemas.vscodeUserData, userDataProvider);
-
-		// Local file access via Tauri backend
 		const isTauri =
 			typeof (globalThis as any).__TAURI_INTERNALS__ !== 'undefined' ||
 			typeof (globalThis as any).__TAURI__ !== 'undefined' ||
 			(globalThis as any).__SIDEX_TAURI__ === true;
+
+		fileService.registerProvider(logsPath.scheme, new InMemoryFileSystemProvider());
+
 		if (isTauri) {
-			const provider = new TauriFileSystemProvider();
-			fileService.registerProvider(Schemas.file, provider);
+			const userDataProvider = new TauriUserDataProvider();
+			fileService.registerProvider(Schemas.vscodeUserData, userDataProvider);
+			logService.info('[SideX] Registered TauriUserDataProvider for vscode-userdata:// scheme');
+
+			const fileProvider = new TauriFileSystemProvider();
+			fileService.registerProvider(Schemas.file, fileProvider);
 			logService.info('[SideX] Registered TauriFileSystemProvider for file:// scheme');
 
 			const vscodeFileProvider = new TauriFileSystemProvider();
 			fileService.registerProvider(Schemas.vscodeFileResource, vscodeFileProvider);
 			logService.info('[SideX] Registered TauriFileSystemProvider for vscode-file:// scheme');
-		} else if (WebFileSystemAccess.supported(mainWindow)) {
-			fileService.registerProvider(Schemas.file, new HTMLFileSystemProvider(indexedDB, handlesStore, logService));
+		} else {
+			const userDataProvider = new InMemoryFileSystemProvider();
+			fileService.registerProvider(Schemas.vscodeUserData, userDataProvider);
+			this.registerDeveloperActions(userDataProvider);
+			logService.warn('[SideX] Tauri backend not detected — user-data is in-memory only');
 		}
 
-		// In-memory
 		fileService.registerProvider(Schemas.tmp, new InMemoryFileSystemProvider());
 	}
 
-	private registerDeveloperActions(provider: IndexedDBFileSystemProvider): void {
+	private registerDeveloperActions(provider: InMemoryFileSystemProvider): void {
 		this._register(
 			registerAction2(
 				class ResetUserDataAction extends Action2 {
@@ -693,7 +667,6 @@ export class BrowserMain extends Disposable {
 
 						if (result.confirmed) {
 							try {
-								await provider?.reset();
 								if (storageService instanceof BrowserStorageService) {
 									await storageService.clear();
 								}

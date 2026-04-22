@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { VSBuffer, decodeBase64, encodeBase64 } from '../../../../base/common/buffer.js';
-import { ResourceMap } from '../../../../base/common/map.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { URI } from '../../../../base/common/uri.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
@@ -56,7 +55,6 @@ export function parseMetadataUri(metadata: URI): URI | undefined {
 	}
 
 	const _scheme = decodeBase64(metadata.fragment).toString();
-
 	return metadata.with({ scheme: _scheme, fragment: null });
 }
 
@@ -116,41 +114,12 @@ export interface INotebookDocumentService {
 	removeNotebookDocument(document: INotebookDocument): void;
 }
 
-export class NotebookDocumentWorkbenchService implements INotebookDocumentService {
+class NullNotebookDocumentService implements INotebookDocumentService {
 	declare readonly _serviceBrand: undefined;
 
-	private readonly _documents = new ResourceMap<INotebookDocument>();
-
-	getNotebook(uri: URI): INotebookDocument | undefined {
-		if (uri.scheme === Schemas.vscodeNotebookCell) {
-			const cellUri = parse(uri);
-			if (cellUri) {
-				const document = this._documents.get(cellUri.notebook);
-				if (document) {
-					return document;
-				}
-			}
-		}
-		if (uri.scheme === Schemas.vscodeNotebookCellOutput) {
-			const parsedData = extractCellOutputDetails(uri);
-			if (parsedData) {
-				const document = this._documents.get(parsedData.notebook);
-				if (document) {
-					return document;
-				}
-			}
-		}
-
-		return this._documents.get(uri);
-	}
-
-	addNotebookDocument(document: INotebookDocument) {
-		this._documents.set(document.uri, document);
-	}
-
-	removeNotebookDocument(document: INotebookDocument) {
-		this._documents.delete(document.uri);
-	}
+	getNotebook(_uri: URI): INotebookDocument | undefined { return undefined; }
+	addNotebookDocument(_document: INotebookDocument): void {}
+	removeNotebookDocument(_document: INotebookDocument): void {}
 }
 
-registerSingleton(INotebookDocumentService, NotebookDocumentWorkbenchService, InstantiationType.Delayed);
+registerSingleton(INotebookDocumentService, NullNotebookDocumentService, InstantiationType.Delayed);

@@ -112,200 +112,44 @@ function toSCMHistoryItemRefDto(historyItemRef?: vscode.SourceControlHistoryItem
 	return historyItemRef ? { ...historyItemRef, icon: getHistoryItemIconDto(historyItemRef.icon) } : undefined;
 }
 
-function compareResourceThemableDecorations(
-	a: vscode.SourceControlResourceThemableDecorations,
-	b: vscode.SourceControlResourceThemableDecorations
-): number {
-	if (!a.iconPath && !b.iconPath) {
-		return 0;
-	} else if (!a.iconPath) {
-		return -1;
-	} else if (!b.iconPath) {
-		return 1;
-	}
-
-	const aPath =
-		typeof a.iconPath === 'string'
-			? a.iconPath
-			: URI.isUri(a.iconPath)
-				? a.iconPath.fsPath
-				: (a.iconPath as vscode.ThemeIcon).id;
-	const bPath =
-		typeof b.iconPath === 'string'
-			? b.iconPath
-			: URI.isUri(b.iconPath)
-				? b.iconPath.fsPath
-				: (b.iconPath as vscode.ThemeIcon).id;
+function compareResourceThemableDecorations(a: vscode.SourceControlResourceThemableDecorations, b: vscode.SourceControlResourceThemableDecorations): number {
+	if (!a.iconPath && !b.iconPath) { return 0; }
+	if (!a.iconPath) { return -1; } if (!b.iconPath) { return 1; }
+	const aPath = typeof a.iconPath === 'string' ? a.iconPath : URI.isUri(a.iconPath) ? a.iconPath.fsPath : (a.iconPath as vscode.ThemeIcon).id;
+	const bPath = typeof b.iconPath === 'string' ? b.iconPath : URI.isUri(b.iconPath) ? b.iconPath.fsPath : (b.iconPath as vscode.ThemeIcon).id;
 	return comparePaths(aPath, bPath);
 }
 
-function compareResourceStatesDecorations(
-	a: vscode.SourceControlResourceDecorations,
-	b: vscode.SourceControlResourceDecorations
-): number {
-	let result = 0;
-
-	if (a.strikeThrough !== b.strikeThrough) {
-		return a.strikeThrough ? 1 : -1;
-	}
-
-	if (a.faded !== b.faded) {
-		return a.faded ? 1 : -1;
-	}
-
-	if (a.tooltip !== b.tooltip) {
-		return (a.tooltip || '').localeCompare(b.tooltip || '');
-	}
-
-	result = compareResourceThemableDecorations(a, b);
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.light && b.light) {
-		result = compareResourceThemableDecorations(a.light, b.light);
-	} else if (a.light) {
-		return 1;
-	} else if (b.light) {
-		return -1;
-	}
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.dark && b.dark) {
-		result = compareResourceThemableDecorations(a.dark, b.dark);
-	} else if (a.dark) {
-		return 1;
-	} else if (b.dark) {
-		return -1;
-	}
-
+function compareResourceStatesDecorations(a: vscode.SourceControlResourceDecorations, b: vscode.SourceControlResourceDecorations): number {
+	if (a.strikeThrough !== b.strikeThrough) { return a.strikeThrough ? 1 : -1; }
+	if (a.faded !== b.faded) { return a.faded ? 1 : -1; }
+	if (a.tooltip !== b.tooltip) { return (a.tooltip || '').localeCompare(b.tooltip || ''); }
+	let result = compareResourceThemableDecorations(a, b);
+	if (result !== 0) { return result; }
+	if (a.light && b.light) { result = compareResourceThemableDecorations(a.light, b.light); } else if (a.light) { return 1; } else if (b.light) { return -1; }
+	if (result !== 0) { return result; }
+	if (a.dark && b.dark) { result = compareResourceThemableDecorations(a.dark, b.dark); } else if (a.dark) { return 1; } else if (b.dark) { return -1; }
 	return result;
 }
 
 function compareCommands(a: vscode.Command, b: vscode.Command): number {
-	if (a.command !== b.command) {
-		return a.command < b.command ? -1 : 1;
-	}
-
-	if (a.title !== b.title) {
-		return a.title < b.title ? -1 : 1;
-	}
-
-	if (a.tooltip !== b.tooltip) {
-		if (a.tooltip !== undefined && b.tooltip !== undefined) {
-			return a.tooltip < b.tooltip ? -1 : 1;
-		} else if (a.tooltip !== undefined) {
-			return 1;
-		} else if (b.tooltip !== undefined) {
-			return -1;
-		}
-	}
-
-	if (a.arguments === b.arguments) {
-		return 0;
-	} else if (!a.arguments) {
-		return -1;
-	} else if (!b.arguments) {
-		return 1;
-	} else if (a.arguments.length !== b.arguments.length) {
-		return a.arguments.length - b.arguments.length;
-	}
-
-	for (let i = 0; i < a.arguments.length; i++) {
-		const aArg = a.arguments[i];
-		const bArg = b.arguments[i];
-
-		if (aArg === bArg) {
-			continue;
-		}
-
-		if (isUri(aArg) && isUri(bArg) && uriEquals(aArg, bArg)) {
-			continue;
-		}
-
-		return aArg < bArg ? -1 : 1;
-	}
-
+	if (a.command !== b.command) { return a.command < b.command ? -1 : 1; }
+	if (a.title !== b.title) { return a.title < b.title ? -1 : 1; }
 	return 0;
 }
 
 function compareResourceStates(a: vscode.SourceControlResourceState, b: vscode.SourceControlResourceState): number {
 	let result = comparePaths(a.resourceUri.fsPath, b.resourceUri.fsPath, true);
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.command && b.command) {
-		result = compareCommands(a.command, b.command);
-	} else if (a.command) {
-		return 1;
-	} else if (b.command) {
-		return -1;
-	}
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.decorations && b.decorations) {
-		result = compareResourceStatesDecorations(a.decorations, b.decorations);
-	} else if (a.decorations) {
-		return 1;
-	} else if (b.decorations) {
-		return -1;
-	}
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.multiFileDiffEditorModifiedUri && b.multiFileDiffEditorModifiedUri) {
-		result = comparePaths(a.multiFileDiffEditorModifiedUri.fsPath, b.multiFileDiffEditorModifiedUri.fsPath, true);
-	} else if (a.multiFileDiffEditorModifiedUri) {
-		return 1;
-	} else if (b.multiFileDiffEditorModifiedUri) {
-		return -1;
-	}
-
-	if (result !== 0) {
-		return result;
-	}
-
-	if (a.multiDiffEditorOriginalUri && b.multiDiffEditorOriginalUri) {
-		result = comparePaths(a.multiDiffEditorOriginalUri.fsPath, b.multiDiffEditorOriginalUri.fsPath, true);
-	} else if (a.multiDiffEditorOriginalUri) {
-		return 1;
-	} else if (b.multiDiffEditorOriginalUri) {
-		return -1;
-	}
-
+	if (result !== 0) { return result; }
+	if (a.command && b.command) { result = compareCommands(a.command, b.command); } else if (a.command) { return 1; } else if (b.command) { return -1; }
+	if (result !== 0) { return result; }
+	if (a.decorations && b.decorations) { result = compareResourceStatesDecorations(a.decorations, b.decorations); } else if (a.decorations) { return 1; } else if (b.decorations) { return -1; }
 	return result;
 }
 
-function compareArgs(a: any[], b: any[]): boolean {
-	for (let i = 0; i < a.length; i++) {
-		if (a[i] !== b[i]) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
 function commandEquals(a: vscode.Command, b: vscode.Command): boolean {
-	return (
-		a.command === b.command &&
-		a.title === b.title &&
-		a.tooltip === b.tooltip &&
-		(a.arguments && b.arguments ? compareArgs(a.arguments, b.arguments) : a.arguments === b.arguments)
-	);
+	return a.command === b.command && a.title === b.title && a.tooltip === b.tooltip;
 }
-
 function commandListEquals(a: readonly vscode.Command[], b: readonly vscode.Command[]): boolean {
 	return equals(a, b, commandEquals);
 }

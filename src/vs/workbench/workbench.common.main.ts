@@ -1,11 +1,26 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  SideX - A fast, native code editor
+ *  Copyright (c) Siden Technologies, Inc. MIT Licensed.
  *--------------------------------------------------------------------------------------------*/
 
 //#region --- editor/workbench core
 
 import '../editor/editor.all.js';
+
+// SideX: Register null stubs for stripped services (must be early)
+import './sidexNullServices.js';
+
+// SideX: Register Rust-backed bridge services as DI singletons
+import '../platform/sidex/browser/sidexFileSystemProvider.js';
+import '../platform/sidex/browser/sidexSearchProvider.js';
+import '../platform/sidex/browser/sidexSCMProvider.js';
+import '../platform/sidex/browser/sidexSyntaxService.js';
+import '../platform/sidex/browser/sidexLspService.js';
+import '../platform/sidex/browser/sidexDapService.js';
+import '../platform/sidex/browser/sidexRemoteService.js';
+import '../platform/sidex/common/sidexThemeService.js';
+import '../platform/sidex/common/sidexSettingsService.js';
+import '../platform/sidex/common/sidexKeymapService.js';
 
 import './api/browser/extensionHost.contribution.js';
 import './browser/workbench.contribution.js';
@@ -108,7 +123,6 @@ import './services/assignment/common/assignmentService.js';
 import './services/outline/browser/outlineService.js';
 import './services/languageDetection/browser/languageDetectionWorkerServiceImpl.js';
 import '../editor/common/services/languageFeaturesService.js';
-import '../editor/common/services/semanticTokensStylingService.js';
 import '../editor/common/services/treeViewsDndService.js';
 import './services/textMate/browser/textMateTokenizationFeature.contribution.js';
 import './services/treeSitter/browser/treeSitter.contribution.js';
@@ -171,28 +185,10 @@ registerSingleton(IWebWorkerService, WebWorkerService, InstantiationType.Delayed
 // Default Account (null stub)
 import './services/accounts/browser/nullDefaultAccount.js';
 
-// Telemetry
-import './contrib/telemetry/browser/telemetry.contribution.js';
-
 // Preferences
 import './contrib/preferences/browser/preferences.contribution.js';
 import './contrib/preferences/browser/keybindingsEditorContribution.js';
 import './contrib/preferences/browser/preferencesSearch.js';
-
-// Performance
-import './contrib/performance/browser/performance.contribution.js';
-
-// Notebook
-import './contrib/notebook/browser/notebook.contribution.js';
-
-// Speech
-import './contrib/speech/browser/speech.contribution.js';
-
-// Interactive
-import './contrib/interactive/browser/interactive.contribution.js';
-
-// repl
-import './contrib/replNotebook/browser/repl.contribution.js';
 
 // Testing
 import './contrib/testing/browser/testing.contribution.js';
@@ -210,7 +206,6 @@ import './contrib/files/browser/files.contribution.js';
 
 // Bulk Edit
 import './contrib/bulkEdit/browser/bulkEditService.js';
-import './contrib/bulkEdit/browser/preview/bulkEdit.contribution.js';
 
 // Search
 import './contrib/search/browser/search.contribution.js';
@@ -226,6 +221,9 @@ import './contrib/sash/browser/sash.contribution.js';
 import './contrib/scm/browser/scm.contribution.js';
 import './contrib/scm/browser/git.contribution.js';
 
+// Remote Explorer
+import './contrib/remote/browser/remote.contribution.js';
+
 // Debug
 import './contrib/debug/browser/debug.contribution.js';
 import './contrib/debug/browser/debugEditorContribution.js';
@@ -237,20 +235,8 @@ import './contrib/debug/browser/debugViewlet.js';
 // Markers
 import './contrib/markers/browser/markers.contribution.js';
 
-// Process Explorer
-import './contrib/processExplorer/browser/processExplorer.contribution.js';
-
-// Merge Editor
-import './contrib/mergeEditor/browser/mergeEditor.contribution.js';
-
-// Multi Diff Editor
-import './contrib/multiDiffEditor/browser/multiDiffEditor.contribution.js';
-
 // Commands
 import './contrib/commands/common/commands.contribution.js';
-
-// Comments
-import './contrib/comments/browser/comments.contribution.js';
 
 // URL Support
 import './contrib/url/browser/url.contribution.js';
@@ -259,13 +245,6 @@ import './contrib/url/browser/url.contribution.js';
 import './contrib/webview/browser/webview.contribution.js';
 import './contrib/webviewPanel/browser/webviewPanel.contribution.js';
 import './contrib/webviewView/browser/webviewView.contribution.js';
-import './contrib/customEditor/browser/customEditor.contribution.js';
-
-// Image Preview
-import './contrib/imagePreview/browser/imagePreview.contribution.js';
-
-// External Uri Opener
-import './contrib/externalUriOpener/common/externalUriOpener.contribution.js';
 
 // Extensions Management
 import './contrib/extensions/browser/extensions.contribution.js';
@@ -278,22 +257,11 @@ import './contrib/output/browser/outputView.js';
 // Terminal
 import './contrib/terminal/terminal.all.js';
 
-// Tauri Terminal Backend (registered via terminal.contribution.ts)
-
 // External terminal
 import './contrib/externalTerminal/browser/externalTerminal.contribution.js';
 
-// Relauncher
-import './contrib/relauncher/browser/relauncher.contribution.js';
-
 // Tasks
 import './contrib/tasks/browser/task.contribution.js';
-
-// Emmet
-import './contrib/emmet/browser/emmet.contribution.js';
-
-// CodeEditor Contributions
-import './contrib/codeEditor/browser/codeEditor.contribution.js';
 
 // Markdown
 import './contrib/markdown/browser/markdown.contribution.js';
@@ -313,55 +281,11 @@ import './contrib/folding/browser/folding.contribution.js';
 // Limit Indicator
 import './contrib/limitIndicator/browser/limitIndicator.contribution.js';
 
-// Inlay Hint Accessibility
-import './contrib/inlayHints/browser/inlayHintsAccessibilty.js';
-
 // Themes
 import './contrib/themes/browser/themes.contribution.js';
 
-// Update
-import './contrib/update/browser/update.contribution.js';
-
-// Surveys
-import './contrib/surveys/browser/nps.contribution.js';
-import './contrib/surveys/browser/languageSurveys.contribution.js';
-
-// Welcome
-import './contrib/welcomeGettingStarted/browser/gettingStarted.contribution.js';
-import './contrib/welcomeWalkthrough/browser/walkThrough.contribution.js';
-import './contrib/welcomeViews/common/viewsWelcome.contribution.js';
-import './contrib/welcomeViews/common/newFile.contribution.js';
-
-// Call Hierarchy
-import './contrib/callHierarchy/browser/callHierarchy.contribution.js';
-
-// Type Hierarchy
-import './contrib/typeHierarchy/browser/typeHierarchy.contribution.js';
-
-// Outline
-import './contrib/codeEditor/browser/outline/documentSymbolsOutline.js';
-import './contrib/outline/browser/outline.contribution.js';
-
-// Language Detection
-import './contrib/languageDetection/browser/languageDetection.contribution.js';
-
 // Language Status
 import './contrib/languageStatus/browser/languageStatus.contribution.js';
-
-// Authentication
-import './contrib/authentication/browser/authentication.contribution.js';
-
-// User Data Profiles
-import './contrib/userDataProfile/browser/userDataProfile.contribution.js';
-
-// Code Actions
-import './contrib/codeActions/browser/codeActions.contribution.js';
-
-// Timeline
-import './contrib/timeline/browser/timeline.contribution.js';
-
-// Local History
-import './contrib/localHistory/browser/localHistory.contribution.js';
 
 // Workspace
 import './contrib/workspace/browser/workspace.contribution.js';
@@ -369,32 +293,8 @@ import './contrib/workspace/browser/workspace.contribution.js';
 // Workspaces
 import './contrib/workspaces/browser/workspaces.contribution.js';
 
-// List
-import './contrib/list/browser/list.contribution.js';
-
 // Accessibility Signals
 import './contrib/accessibilitySignals/browser/accessibilitySignal.contribution.js';
-
-// Bracket Pair Colorizer 2 Telemetry
-import './contrib/bracketPairColorizer2Telemetry/browser/bracketPairColorizer2Telemetry.contribution.js';
-
-// Accessibility
-import './contrib/accessibility/browser/accessibility.contribution.js';
-
-// Metered Connection
-import './contrib/meteredConnection/browser/meteredConnection.contribution.js';
-
-// Share
-import './contrib/share/browser/share.contribution.js';
-
-// Synchronized Scrolling
-import './contrib/scrollLocking/browser/scrollLocking.contribution.js';
-
-// Drop or paste into
-import './contrib/dropOrPasteInto/browser/dropOrPasteInto.contribution.js';
-
-// Edit Telemetry
-import './contrib/editTelemetry/browser/editTelemetry.contribution.js';
 
 // Opener
 import './contrib/opener/browser/opener.contribution.js';

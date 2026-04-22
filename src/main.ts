@@ -29,20 +29,40 @@ async function boot() {
 	// Load locale translations before any VS Code module imports
 	await loadNlsMessages();
 
-	const stages = [
-		['common', () => import('./vs/workbench/workbench.common.main.js')],
-		['web.main', () => import('./vs/workbench/browser/web.main.js')],
-		['web-dialog', () => import('./vs/workbench/browser/parts/dialogs/dialog.web.contribution.js')],
-		['web-services', () => import('./vs/workbench/workbench.web.main.js')]
-	] as const;
+	await Promise.all([
+		import('./vs/workbench/workbench.common.main.js').catch(e => { console.error('[SideX] Barrel "common" failed:', e); throw e; }),
+		import('./vs/workbench/browser/web.main.js').catch(e => { console.error('[SideX] Barrel "web.main" failed:', e); throw e; }),
+		import('./vs/workbench/browser/parts/dialogs/dialog.web.contribution.js').catch(e => { console.error('[SideX] Barrel "web-dialog" failed:', e); throw e; }),
+		import('./vs/workbench/workbench.web.main.js').catch(e => { console.error('[SideX] Barrel "web-services" failed:', e); throw e; }),
+	]);
 
-	for (const [label, loader] of stages) {
-		try {
-			await loader();
-		} catch (e) {
-			console.error(`[SideX] Barrel stage "${label}" failed:`, e);
-			throw e;
-		}
+	// SideX Rust bridge initialization — make services available before workbench creation
+	if ((globalThis as any).__SIDEX_TAURI__) {
+		const {
+			SideXEditorBridge,
+			SideXSyntaxService,
+			SideXGitService,
+			SideXSearchService,
+			SideXSettingsService,
+			SideXThemeService,
+			SideXExtensionService,
+			SideXKeymapService,
+			SideXFileSystemProvider,
+		} = await import('./vs/platform/sidex/common/sidexServices.js');
+
+		(globalThis as any).__SIDEX_SERVICES__ = {
+			editor: SideXEditorBridge.getInstance(),
+			syntax: new SideXSyntaxService(),
+			git: new SideXGitService(),
+			search: new SideXSearchService(),
+			settings: new SideXSettingsService(),
+			theme: new SideXThemeService(),
+			extensions: new SideXExtensionService(),
+			keymap: new SideXKeymapService(),
+			fileSystem: new SideXFileSystemProvider(),
+		};
+
+		console.log('[SideX] Rust bridge services initialized');
 	}
 
 	const { create } = await import('./vs/workbench/browser/web.factory.js');
@@ -103,7 +123,7 @@ async function boot() {
 			'workbench.startupEditor': 'welcomePage',
 			'workbench.enableExperiments': false,
 			'workbench.iconTheme': 'vs-seti',
-			'workbench.colorTheme': 'Default Dark Modern',
+			'workbench.colorTheme': 'Dark Modern',
 			'editor.experimentalGpuAcceleration': 'auto',
 			'workbench.productIconTheme': 'Default',
 			'workbench.editor.showTabs': 'multiple',

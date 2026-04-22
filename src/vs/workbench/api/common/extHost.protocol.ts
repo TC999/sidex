@@ -111,12 +111,6 @@ import { InputValidationType } from '../../contrib/scm/common/scm.js';
 import { IWorkspaceSymbol, NotebookPriorityInfo } from '../../contrib/search/common/search.js';
 import { IRawClosedNotebookFileMatch } from '../../contrib/search/common/searchNotebookHelpers.js';
 import {
-	IKeywordRecognitionEvent,
-	ISpeechProviderMetadata,
-	ISpeechToTextEvent,
-	ITextToSpeechEvent
-} from '../../contrib/speech/common/speechService.js';
-import {
 	CoverageDetails,
 	ExtensionRunTestsRequest,
 	ICallProfileRunHandler,
@@ -192,10 +186,6 @@ export interface IConfigurationInitData extends IConfigurationData {
 export interface IMainContext extends IRPCProtocol {}
 
 // --- main thread
-
-export interface MainThreadGitExtensionShape extends IDisposable {
-	$onDidChangeRepository(handle: number): Promise<void>;
-}
 
 export interface MainThreadClipboardShape extends IDisposable {
 	$readText(): Promise<string>;
@@ -1677,27 +1667,6 @@ export interface MainThreadNotebookRenderersShape extends IDisposable {
 }
 
 export interface MainThreadInteractiveShape extends IDisposable {}
-
-export interface MainThreadSpeechShape extends IDisposable {
-	$registerProvider(handle: number, identifier: string, metadata: ISpeechProviderMetadata): void;
-	$unregisterProvider(handle: number): void;
-
-	$emitSpeechToTextEvent(session: number, event: ISpeechToTextEvent): void;
-	$emitTextToSpeechEvent(session: number, event: ITextToSpeechEvent): void;
-	$emitKeywordRecognitionEvent(session: number, event: IKeywordRecognitionEvent): void;
-}
-
-export interface ExtHostSpeechShape {
-	$createSpeechToTextSession(handle: number, session: number, language?: string): Promise<void>;
-	$cancelSpeechToTextSession(session: number): Promise<void>;
-
-	$createTextToSpeechSession(handle: number, session: number, language?: string): Promise<void>;
-	$synthesizeSpeech(session: number, text: string): Promise<void>;
-	$cancelTextToSpeechSession(session: number): Promise<void>;
-
-	$createKeywordRecognitionSession(handle: number, session: number): Promise<void>;
-	$cancelKeywordRecognitionSession(session: number): Promise<void>;
-}
 
 export interface BrowserTabDto {
 	id: string;
@@ -4044,84 +4013,11 @@ export interface MainThreadTestingShape {
 	$markTestRetired(testIds: string[] | undefined): void;
 }
 
-export interface GitRefQueryDto {
-	readonly contains?: string;
-	readonly count?: number;
-	readonly pattern?: string | string[];
-	readonly sort?: 'alphabetically' | 'committerdate' | 'creatordate';
-}
-
-export enum GitRefTypeDto {
-	Head,
-	RemoteHead,
-	Tag
-}
-
-export interface GitRefDto {
-	readonly id: string;
-	readonly name: string;
-	readonly type: GitRefTypeDto;
-	readonly revision: string;
-}
-
-export interface GitChangeDto {
-	readonly uri: UriComponents;
-	readonly originalUri: UriComponents | undefined;
-	readonly modifiedUri: UriComponents | undefined;
-}
-
-export interface GitDiffChangeDto extends GitChangeDto {
-	readonly insertions: number;
-	readonly deletions: number;
-}
-
-export interface GitRepositoryStateDto {
-	readonly HEAD?: GitBranchDto;
-	readonly mergeChanges: readonly GitChangeDto[];
-	readonly indexChanges: readonly GitChangeDto[];
-	readonly workingTreeChanges: readonly GitChangeDto[];
-	readonly untrackedChanges: readonly GitChangeDto[];
-}
-
-export interface GitBranchDto {
-	readonly name?: string;
-	readonly commit?: string;
-	readonly type: GitRefTypeDto;
-	readonly remote?: string;
-	readonly base?: GitBaseRefDto;
-	readonly upstream?: GitUpstreamRefDto;
-	readonly ahead?: number;
-	readonly behind?: number;
-}
-
-export interface GitBaseRefDto {
-	readonly name: string;
-	readonly isProtected: boolean;
-}
-
-export interface GitUpstreamRefDto {
-	readonly remote: string;
-	readonly name: string;
-	readonly commit?: string;
-}
-
-export interface ExtHostGitExtensionShape {
-	$isGitExtensionAvailable(): Promise<boolean>;
-	$openRepository(
-		root: UriComponents
-	): Promise<{ handle: number; rootUri: UriComponents; state: GitRepositoryStateDto } | undefined>;
-	$getRefs(handle: number, query: GitRefQueryDto, token?: CancellationToken): Promise<GitRefDto[]>;
-	$getRepositoryState(handle: number): Promise<GitRepositoryStateDto | undefined>;
-	$diffBetweenWithStats(handle: number, ref1: string, ref2: string, path?: string): Promise<GitDiffChangeDto[]>;
-	$diffBetweenWithStats2(handle: number, ref: string, path?: string): Promise<GitDiffChangeDto[]>;
-}
-
 // --- proxy identifiers
 
 export const MainContext = {
 	MainThreadAuthentication: createProxyIdentifier<MainThreadAuthenticationShape>('MainThreadAuthentication'),
 	MainThreadBulkEdits: createProxyIdentifier<MainThreadBulkEditsShape>('MainThreadBulkEdits'),
-	MainThreadGitExtension: createProxyIdentifier<MainThreadGitExtensionShape>('MainThreadGitExtension'),
 	MainThreadClipboard: createProxyIdentifier<MainThreadClipboardShape>('MainThreadClipboard'),
 	MainThreadCommands: createProxyIdentifier<MainThreadCommandsShape>('MainThreadCommands'),
 	MainThreadComments: createProxyIdentifier<MainThreadCommentsShape>('MainThreadComments'),
@@ -4152,7 +4048,6 @@ export const MainContext = {
 	MainThreadStatusBar: createProxyIdentifier<MainThreadStatusBarShape>('MainThreadStatusBar'),
 	MainThreadSecretState: createProxyIdentifier<MainThreadSecretStateShape>('MainThreadSecretState'),
 	MainThreadStorage: createProxyIdentifier<MainThreadStorageShape>('MainThreadStorage'),
-	MainThreadSpeech: createProxyIdentifier<MainThreadSpeechShape>('MainThreadSpeechProvider'),
 	MainThreadTelemetry: createProxyIdentifier<MainThreadTelemetryShape>('MainThreadTelemetry'),
 	MainThreadMeteredConnection: createProxyIdentifier<MainThreadMeteredConnectionShape>('MainThreadMeteredConnection'),
 	MainThreadTerminalService: createProxyIdentifier<MainThreadTerminalServiceShape>('MainThreadTerminalService'),
@@ -4264,7 +4159,6 @@ export const ExtHostContext = {
 		'ExtHostNotebookDocumentSaveParticipant'
 	),
 	ExtHostInteractive: createProxyIdentifier<ExtHostInteractiveShape>('ExtHostInteractive'),
-	ExtHostSpeech: createProxyIdentifier<ExtHostSpeechShape>('ExtHostSpeech'),
 	ExtHostTheming: createProxyIdentifier<ExtHostThemingShape>('ExtHostTheming'),
 	ExtHostTunnelService: createProxyIdentifier<ExtHostTunnelServiceShape>('ExtHostTunnelService'),
 	ExtHostManagedSockets: createProxyIdentifier<ExtHostManagedSocketsShape>('ExtHostManagedSockets'),
@@ -4275,6 +4169,5 @@ export const ExtHostContext = {
 	ExtHostMeteredConnection: createProxyIdentifier<ExtHostMeteredConnectionShape>('ExtHostMeteredConnection'),
 	ExtHostLocalization: createProxyIdentifier<ExtHostLocalizationShape>('ExtHostLocalization'),
 	ExtHostDataChannels: createProxyIdentifier<ExtHostDataChannelsShape>('ExtHostDataChannels'),
-	ExtHostGitExtension: createProxyIdentifier<ExtHostGitExtensionShape>('ExtHostGitExtension'),
 	ExtHostBrowsers: createProxyIdentifier<ExtHostBrowsersShape>('ExtHostBrowsers')
 };

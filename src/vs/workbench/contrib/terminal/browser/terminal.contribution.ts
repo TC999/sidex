@@ -36,17 +36,13 @@ import { registerColors } from '../common/terminalColorRegistry.js';
 import { registerTerminalConfiguration } from '../common/terminalConfiguration.js';
 import { terminalStrings } from '../common/terminalStrings.js';
 import './media/terminal.css';
-import './media/terminalVoice.css';
 import './media/widgets.css';
 import './media/xterm.css';
-import { RemoteTerminalBackendContribution } from './remoteTerminalBackend.js';
 import {
-	ITerminalChatService,
 	ITerminalConfigurationService,
 	ITerminalEditingService,
 	ITerminalEditorService,
 	ITerminalGroupService,
-	ITerminalInstance,
 	ITerminalInstanceService,
 	ITerminalService,
 	TerminalDataTransfers,
@@ -68,50 +64,6 @@ import { TerminalProfileService } from './terminalProfileService.js';
 import { TerminalService } from './terminalService.js';
 import { TerminalTelemetryContribution } from './terminalTelemetry.js';
 import { TerminalViewPane } from './terminalView.js';
-import { Emitter, Event } from '../../../../base/common/event.js';
-import { Disposable, IDisposable } from '../../../../base/common/lifecycle.js';
-
-class NullTerminalChatService extends Disposable implements ITerminalChatService {
-	readonly _serviceBrand: undefined;
-	private readonly _onDidRegister = this._register(new Emitter<ITerminalInstance>());
-	readonly onDidRegisterTerminalInstanceWithToolSession: Event<ITerminalInstance> = this._onDidRegister.event;
-	registerTerminalInstanceWithToolSession(): void {}
-	async getTerminalInstanceByToolSessionId(): Promise<ITerminalInstance | undefined> {
-		return undefined;
-	}
-	getToolSessionTerminalInstances(): readonly ITerminalInstance[] {
-		return [];
-	}
-	getToolSessionIdForInstance(): string | undefined {
-		return undefined;
-	}
-	registerTerminalInstanceWithChatSession(): void {}
-	getChatSessionResourceForInstance(): URI | undefined {
-		return undefined;
-	}
-	isBackgroundTerminal(): boolean {
-		return false;
-	}
-	registerProgressPart(): IDisposable {
-		return Disposable.None;
-	}
-	setFocusedProgressPart(): void {}
-	clearFocusedProgressPart(): void {}
-	getFocusedProgressPart(): undefined {
-		return undefined;
-	}
-	getMostRecentProgressPart(): undefined {
-		return undefined;
-	}
-	setChatSessionAutoApproval(): void {}
-	hasChatSessionAutoApproval(): boolean {
-		return false;
-	}
-	addSessionAutoApproveRule(): void {}
-	getSessionAutoApproveRules(): Readonly<Record<string, boolean | { approve: boolean; matchCommandLine?: boolean }>> {
-		return {};
-	}
-}
 
 // Register services
 registerSingleton(ITerminalLogService, TerminalLogService, InstantiationType.Delayed);
@@ -121,17 +73,11 @@ registerSingleton(ITerminalEditorService, TerminalEditorService, InstantiationTy
 registerSingleton(ITerminalEditingService, TerminalEditingService, InstantiationType.Delayed);
 registerSingleton(ITerminalGroupService, TerminalGroupService, InstantiationType.Delayed);
 registerSingleton(ITerminalInstanceService, TerminalInstanceService, InstantiationType.Delayed);
-registerSingleton(ITerminalChatService, NullTerminalChatService, InstantiationType.Delayed);
 registerSingleton(ITerminalProfileService, TerminalProfileService, InstantiationType.Delayed);
 
 // Register workbench contributions
 // This contribution blocks startup as it's critical to enable the web embedder window.createTerminal API
 registerWorkbenchContribution2(TerminalMainContribution.ID, TerminalMainContribution, WorkbenchPhase.BlockStartup);
-registerWorkbenchContribution2(
-	RemoteTerminalBackendContribution.ID,
-	RemoteTerminalBackendContribution,
-	WorkbenchPhase.AfterRestored
-);
 registerWorkbenchContribution2(
 	TerminalTelemetryContribution.ID,
 	TerminalTelemetryContribution,

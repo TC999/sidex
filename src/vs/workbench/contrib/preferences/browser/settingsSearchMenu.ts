@@ -40,7 +40,10 @@ export class SettingsSearchFilterDropdownMenuActionViewItem extends DropdownMenu
 			menuAsChild: true
 		});
 
-		this.suggestController = SuggestController.get(this.searchWidget.inputWidget);
+		const widget = this.searchWidget.inputWidget;
+		this.suggestController = typeof (widget as any).getContribution === 'function'
+			? SuggestController.get(widget as any)
+			: null;
 	}
 
 	override render(container: HTMLElement): void {

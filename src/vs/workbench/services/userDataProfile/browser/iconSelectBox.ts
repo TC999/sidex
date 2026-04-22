@@ -54,10 +54,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	when: WorkbenchIconSelectBoxFocusContextKey,
 	primary: KeyCode.UpArrow,
 	handler: () => {
-		const selectBox = WorkbenchIconSelectBox.getFocusedWidget();
-		if (selectBox) {
-			selectBox.focusPreviousRow();
-		}
+		WorkbenchIconSelectBox.getFocusedWidget()?.focusPreviousRow();
 	}
 });
 
@@ -67,48 +64,27 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	when: WorkbenchIconSelectBoxFocusContextKey,
 	primary: KeyCode.DownArrow,
 	handler: () => {
-		const selectBox = WorkbenchIconSelectBox.getFocusedWidget();
-		if (selectBox) {
-			selectBox.focusNextRow();
-		}
+		WorkbenchIconSelectBox.getFocusedWidget()?.focusNextRow();
 	}
 });
 
 KeybindingsRegistry.registerCommandAndKeybindingRule({
 	id: 'iconSelectBox.focusNext',
 	weight: KeybindingWeight.WorkbenchContrib,
-	when: ContextKeyExpr.and(
-		WorkbenchIconSelectBoxFocusContextKey,
-		ContextKeyExpr.or(
-			WorkbenchIconSelectBoxInputEmptyContextKey,
-			WorkbenchIconSelectBoxInputFocusContextKey.toNegated()
-		)
-	),
+	when: ContextKeyExpr.and(WorkbenchIconSelectBoxFocusContextKey, WorkbenchIconSelectBoxInputFocusContextKey.negate()),
 	primary: KeyCode.RightArrow,
 	handler: () => {
-		const selectBox = WorkbenchIconSelectBox.getFocusedWidget();
-		if (selectBox) {
-			selectBox.focusNext();
-		}
+		WorkbenchIconSelectBox.getFocusedWidget()?.focusNext();
 	}
 });
 
 KeybindingsRegistry.registerCommandAndKeybindingRule({
 	id: 'iconSelectBox.focusPrevious',
 	weight: KeybindingWeight.WorkbenchContrib,
-	when: ContextKeyExpr.and(
-		WorkbenchIconSelectBoxFocusContextKey,
-		ContextKeyExpr.or(
-			WorkbenchIconSelectBoxInputEmptyContextKey,
-			WorkbenchIconSelectBoxInputFocusContextKey.toNegated()
-		)
-	),
+	when: ContextKeyExpr.and(WorkbenchIconSelectBoxFocusContextKey, WorkbenchIconSelectBoxInputFocusContextKey.negate()),
 	primary: KeyCode.LeftArrow,
 	handler: () => {
-		const selectBox = WorkbenchIconSelectBox.getFocusedWidget();
-		if (selectBox) {
-			selectBox.focusPrevious();
-		}
+		WorkbenchIconSelectBox.getFocusedWidget()?.focusPrevious();
 	}
 });
 
@@ -118,9 +94,6 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	when: WorkbenchIconSelectBoxFocusContextKey,
 	primary: KeyCode.Enter,
 	handler: () => {
-		const selectBox = WorkbenchIconSelectBox.getFocusedWidget();
-		if (selectBox) {
-			selectBox.setSelection(selectBox.getFocus()[0]);
-		}
+		WorkbenchIconSelectBox.getFocusedWidget()?.selectFocused();
 	}
 });
