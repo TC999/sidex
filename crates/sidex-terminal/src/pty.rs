@@ -728,6 +728,7 @@ impl PtyProcess {
     /// Attempts to read the current working directory of the shell process
     /// via `/proc/<pid>/cwd` on Linux or `lsof` on macOS.
     pub fn get_cwd(&self) -> Option<PathBuf> {
+        #[allow(unused_variables)]
         let pid = self.pid()?;
 
         #[cfg(target_os = "linux")]
